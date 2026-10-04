@@ -1,0 +1,71 @@
+name: upivo
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment: &environment
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-upivo}:${POSTGRES_PASSWORD:-upivo}@postgres:5432/${POSTGRES_DB:-upivo}
+    REDIS_URL: redis://redis:6379/0
+    APP_HOST: 0.0.0.0
+    APP_PORT: 8000
+  depends_on:
+    postgres:
+      condition: service_healthy
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-upivo}
+      POSTGRES_USER: ${POSTGRES_USER:-upivo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-upivo}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  worker:
+    <<: *backend
+    profiles: ["workers"]
+    command: ["celery", "-A", "app.workers.celery_app:celery_app", "worker", "--loglevel=INFO"]
+    depends_on:
+      redis:
+        condition: service_healthy
+  beat:
+    <<: *backend
+    profiles: ["workers"]
+    command: ["celery", "-A", "app.workers.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      redis:
+        condition: service_healthy
+volumes:
+  postgres-data:
