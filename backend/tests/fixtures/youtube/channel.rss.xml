@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw"/>
+ <id>yt:channel:_x5XG1OV2P6uZZ5FSM9Ttw</id>
+ <yt:channelId>_x5XG1OV2P6uZZ5FSM9Ttw</yt:channelId>
+ <title>Google for Developers</title>
+ <link rel="alternate" href="https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw"/>
+ <author>
+  <name>Google for Developers</name>
+  <uri>https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw</uri>
+ </author>
+ <published>2007-08-23T00:34:43+00:00</published>
+ <entry>
+  <id>yt:video:8Xv5BLnXzgI</id>
+  <yt:videoId>8Xv5BLnXzgI</yt:videoId>
+  <yt:channelId>UC_x5XG1OV2P6uZZ5FSM9Ttw</yt:channelId>
+  <title>Building a voice-to-print mirror with Gemini</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=8Xv5BLnXzgI"/>
+  <author>
+   <name>Google for Developers</name>
+   <uri>https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw</uri>
+  </author>
+  <published>2026-10-01T23:00:21+00:00</published>
+  <updated>2026-10-02T03:52:07+00:00</updated>
+  <media:group>
+   <media:title>Building a voice-to-print mirror with Gemini</media:title>
+   <media:thumbnail url="https://i.ytimg.com/vi/8Xv5BLnXzgI/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Gayatri built a custom journaling device using Gemini.</media:description>
+  </media:group>
+ </entry>
+ <entry>
+  <id>yt:video:Rnz9mOyxk0k</id>
+  <yt:videoId>Rnz9mOyxk0k</yt:videoId>
+  <yt:channelId>UC_x5XG1OV2P6uZZ5FSM9Ttw</yt:channelId>
+  <title>How to transform audio into physical prints</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=Rnz9mOyxk0k"/>
+  <author>
+   <name>Google for Developers</name>
+   <uri>https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw</uri>
+  </author>
+  <published>2026-10-01T19:00:13+00:00</published>
+  <updated>2026-10-01T19:36:08+00:00</updated>
+  <media:group>
+   <media:title>How to transform audio into physical prints</media:title>
+   <media:thumbnail url="https://i.ytimg.com/vi/Rnz9mOyxk0k/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Using Gemini to transform spoken words into visual artifacts.</media:description>
+  </media:group>
+ </entry>
+</feed>

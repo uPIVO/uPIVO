@@ -16,7 +16,8 @@ CREATE TYPE source_type AS ENUM (
     'telegram',
     'website',
     'rss',
-    'habr'
+    'habr',
+    'youtube'
 );
 
 CREATE TYPE processing_status AS ENUM (

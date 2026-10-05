@@ -62,3 +62,18 @@ uv run pytest
 
 Куда класть код — см. [границы модулей](ARCHITECTURE.md). Не добавляйте новый слой,
 пока у него нет понятной задачи. Connector и extractor создаются отдельными задачами.
+
+## Парсер YouTube
+
+Сбор сырых видео с публичного канала через RSS (feedparser, без API-ключа).
+Нужны PostgreSQL и `alembic upgrade head`. Из `backend/`:
+
+```bash
+uv run python -m app.connectors.youtube "https://www.youtube.com/@GoogleDevelopers"
+```
+
+Без записи в БД: добавьте `--dry-run`. Несколько последних роликов (обычно до 15)
+пишутся в `sources` + `feed_items` (title, url, published_at, description, raw_payload).
+Повторный запуск обновляет те же `external_id`. Пустой канал — source и 0 записей.
+Неверный URL завершает процесс с кодом 2; сеть/HTTP — с кодом 1.
+Не принимаются search, playlist, watch и OAuth.

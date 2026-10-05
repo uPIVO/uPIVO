@@ -1,7 +1,8 @@
 # Архитектура Upivo
 
-Сейчас это один backend, без продуктовых endpoint и таблиц. Все описанные ниже
-этапы обработки — план для отдельных задач, а не уже реализованная функциональность.
+Сейчас это один backend, без продуктовых HTTP-endpoint. Миграция `0002` добавляет
+таблицы `sources` и `feed_items` для сырого сбора. Остальные этапы обработки —
+план для отдельных задач, а не уже реализованная функциональность.
 
 | Технология | Зачем Upivo |
 | --- | --- |
@@ -13,7 +14,7 @@
 | httpx | Скачивает страницу или обращается к внешнему HTTP API |
 | trafilatura | Извлекает основной текст статьи, убирая меню/рекламу/шум |
 | BeautifulSoup | Точечный разбор HTML там, где trafilatura недостаточно |
-| feedparser | Читает RSS/Atom, включая RSS Habr |
+| feedparser | Читает RSS/Atom, включая RSS Habr и RSS канала YouTube |
 | Redis | Broker фоновых задач / быстрое промежуточное хранилище |
 | Celery | Worker, выполняющий долгие фоновые задачи |
 | Celery Beat | Планировщик, который по расписанию ставит задачи Celery |
@@ -34,8 +35,11 @@ external source → collection → raw_payload → normalization → FeedItem
 и другие быстро извлечённые сущности без LLM. Формат и полную модель согласует команда.
 
 Telegram API → Telethon → connectors/telegram → будущий FeedItem.
+YouTube → канал RSS (feedparser, без Data API) → connectors/youtube → сырые
+строки `feed_items` (`raw_payload`, title, url, published_at). Это сбор сырья,
+не normalization и не дайджест.
 Connector отвечает за доступ к источнику, normalization приводит данные к общей форме.
-Конкретные парсеры пока не реализованы; session-файлы хранятся локально.
+Session-файлы Telegram хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
 rawjson-extractor из Siftly. TypeScript не копируется; extractor требует отдельной задачи.
@@ -49,10 +53,11 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 - `api`: HTTP-маршруты; сейчас только `/health` и `/health/db` (SELECT 1).
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: будущие ORM-модели; импортируйте их в models/__init__.py для Alembic.
+- `models`: ORM `Source` / `FeedItem` и enum `source_type` (включая youtube).
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: будущие сценарии продукта, добавлять по задачам.
-- `connectors`: доступ к Telegram/web/RSS.
+- `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
+  `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: normalization, extraction и дальнейшая обработка.
 - `ai`: provider-neutral интерфейс.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
