@@ -1,7 +1,7 @@
 """YouTube channel connector.
 
-Collects recent videos from a public channel RSS feed (feedparser, no API key).
-Does not summarize, digest, or normalize into later pipeline stages.
+Collects recent videos from a public channel RSS feed (feedparser, no API key)
+and, when present, public captions via timedtext.
 
 Run against one channel from backend/ after PostgreSQL is up and migrations applied:
 

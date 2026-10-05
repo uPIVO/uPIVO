@@ -18,10 +18,43 @@ CHANNEL_ID = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
 CHANNEL_RSS = (FIXTURES / "channel.rss.xml").read_text()
 EMPTY_RSS = (FIXTURES / "empty.rss.xml").read_text()
 CHANNEL_HTML = (FIXTURES / "channel.html").read_text()
+CAPTIONS_LIST = (FIXTURES / "captions-list.xml").read_text()
+CAPTIONS_EN = (FIXTURES / "captions-en.xml").read_text()
+CAPTIONS_LIST_EMPTY = (FIXTURES / "captions-list-empty.xml").read_text()
 
 
 def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+
+def _rss_handler(
+    rss: str = CHANNEL_RSS,
+    *,
+    list_xml: str = CAPTIONS_LIST_EMPTY,
+    transcript_xml: str | None = None,
+    caption_error: Exception | None = None,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/feeds/videos.xml"):
+            return httpx.Response(200, text=rss)
+        if path == "/@GoogleDevelopers":
+            return httpx.Response(200, text=CHANNEL_HTML)
+        if path == "/api/timedtext":
+            if caption_error is not None:
+                raise caption_error
+            if request.url.params.get("type") == "list":
+                return httpx.Response(200, text=list_xml)
+            if transcript_xml:
+                return httpx.Response(200, text=transcript_xml)
+            return httpx.Response(200, content=b"")
+        if path == "/watch":
+            if caption_error is not None:
+                raise caption_error
+            return httpx.Response(200, text="<html><title>no player captions</title></html>")
+        raise AssertionError(request.url)
+
+    return handler
 
 
 def test_source_type_includes_youtube_alongside_telegram_and_habr():
@@ -72,11 +105,7 @@ def test_parse_rejects_non_channel_urls(url):
 
 
 def test_fetch_recent_videos_from_channel_id():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params.get("channel_id") == CHANNEL_ID
-        return httpx.Response(200, text=CHANNEL_RSS)
-
-    result = YouTubeConnector(client=_client(handler)).fetch(
+    result = YouTubeConnector(client=_client(_rss_handler())).fetch(
         f"https://www.youtube.com/channel/{CHANNEL_ID}"
     )
     assert result.source_external_id == CHANNEL_ID
@@ -95,14 +124,7 @@ def test_fetch_recent_videos_from_channel_id():
 
 
 def test_fetch_resolves_handle_via_channel_page():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/@GoogleDevelopers":
-            return httpx.Response(200, text=CHANNEL_HTML)
-        if request.url.path.endswith("/feeds/videos.xml"):
-            return httpx.Response(200, text=CHANNEL_RSS)
-        raise AssertionError(request.url)
-
-    result = YouTubeConnector(client=_client(handler)).fetch(
+    result = YouTubeConnector(client=_client(_rss_handler())).fetch(
         "https://www.youtube.com/@GoogleDevelopers"
     )
     assert result.source_external_id == CHANNEL_ID
@@ -110,10 +132,7 @@ def test_fetch_resolves_handle_via_channel_page():
 
 
 def test_fetch_empty_channel_returns_no_items():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=EMPTY_RSS)
-
-    result = YouTubeConnector(client=_client(handler)).fetch(
+    result = YouTubeConnector(client=_client(_rss_handler(EMPTY_RSS))).fetch(
         f"https://www.youtube.com/channel/{CHANNEL_ID}"
     )
     assert result.items == []
@@ -121,10 +140,7 @@ def test_fetch_empty_channel_returns_no_items():
 
 
 def test_fetch_limit_keeps_most_recent_rss_entries():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=CHANNEL_RSS)
-
-    result = YouTubeConnector(client=_client(handler)).fetch(
+    result = YouTubeConnector(client=_client(_rss_handler())).fetch(
         f"https://www.youtube.com/channel/{CHANNEL_ID}",
         limit=1,
     )
@@ -179,6 +195,40 @@ def test_fetch_timeout():
         )
 
 
+def test_fetch_uses_captions_as_body_text_when_present():
+    result = YouTubeConnector(
+        client=_client(_rss_handler(list_xml=CAPTIONS_LIST, transcript_xml=CAPTIONS_EN))
+    ).fetch(f"https://www.youtube.com/channel/{CHANNEL_ID}", limit=1)
+    item = result.items[0]
+    assert item.body_text == "Hello from the transcript.\nThis is caption line two."
+    assert item.raw_payload["description"].startswith("Gayatri")
+    assert item.raw_payload["transcript"] == item.body_text
+    assert item.raw_payload["transcript_lang"] == "en"
+    assert item.title == "Building a voice-to-print mirror with Gemini"
+    assert item.original_url.startswith("https://www.youtube.com/")
+    assert item.published_at is not None
+
+
+def test_fetch_keeps_video_when_captions_are_missing():
+    result = YouTubeConnector(client=_client(_rss_handler())).fetch(
+        f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        limit=1,
+    )
+    item = result.items[0]
+    assert "Gemini" in item.body_text
+    assert item.raw_payload.get("transcript") is None
+
+
+def test_fetch_keeps_video_when_caption_request_fails():
+    result = YouTubeConnector(
+        client=_client(_rss_handler(caption_error=httpx.ConnectError("captions down")))
+    ).fetch(f"https://www.youtube.com/channel/{CHANNEL_ID}", limit=1)
+    item = result.items[0]
+    assert item.external_id == "8Xv5BLnXzgI"
+    assert "Gemini" in item.body_text
+    assert item.raw_payload.get("transcript") is None
+
+
 def test_cli_bad_url_exits_2():
     assert main(["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]) == 2
 
@@ -214,6 +264,7 @@ def test_cli_dry_run_prints_without_database(capsys, monkeypatch):
     assert "dry-run" in output
     assert "Demo video" in output
     assert "watch?v=abc" in output
+    assert "captions=no" in output
 
 
 class _Rows:

@@ -35,9 +35,9 @@ external source → collection → raw_payload → normalization → FeedItem
 и другие быстро извлечённые сущности без LLM. Формат и полную модель согласует команда.
 
 Telegram API → Telethon → connectors/telegram → будущий FeedItem.
-YouTube → канал RSS (feedparser, без Data API) → connectors/youtube → сырые
-строки `feed_items` (`raw_payload`, title, url, published_at). Это сбор сырья,
-не normalization и не дайджест.
+YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
+сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
+Это сбор сырья, не normalization и не дайджест.
 Connector отвечает за доступ к источнику, normalization приводит данные к общей форме.
 Session-файлы Telegram хранятся локально.
 

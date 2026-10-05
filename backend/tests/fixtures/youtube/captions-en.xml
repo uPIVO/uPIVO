@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<transcript>
+  <text start="0.5" dur="2.0">Hello from the transcript.</text>
+  <text start="2.5" dur="2.4">This is caption line two.</text>
+  <text start="5.0" dur="1.8">This is caption line two.</text>
+</transcript>

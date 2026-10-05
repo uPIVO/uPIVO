@@ -15,6 +15,7 @@ from app.connectors.base import (
     RawPublication,
     SourceFetchError,
 )
+from app.connectors.youtube.captions import fetch_transcript
 from app.connectors.youtube.urls import (
     ParsedChannelUrl,
     canonical_channel_url,
@@ -78,6 +79,7 @@ class YouTubeConnector:
         ]
         if limit is not None:
             items = items[:limit]
+        items = [_with_transcript(client, item) for item in items]
         return FetchResult(
             source_name=source_name,
             source_external_id=channel_id,
@@ -149,6 +151,35 @@ def _entry_to_publication(entry: Any, channel_id: str) -> RawPublication | None:
         body_text=description,
         published_at=published_at,
         author=author,
+        raw_payload=payload,
+    )
+
+
+def _with_transcript(client: httpx.Client, item: RawPublication) -> RawPublication:
+    caption = fetch_transcript(client, item.external_id)
+    payload = dict(item.raw_payload)
+    if caption is None:
+        payload.setdefault("transcript", None)
+        payload.setdefault("transcript_lang", None)
+        return RawPublication(
+            external_id=item.external_id,
+            original_url=item.original_url,
+            title=item.title,
+            body_text=item.body_text,
+            published_at=item.published_at,
+            author=item.author,
+            raw_payload=payload,
+        )
+    payload["transcript"] = caption.text
+    payload["transcript_lang"] = caption.lang
+    payload["transcript_kind"] = caption.kind
+    return RawPublication(
+        external_id=item.external_id,
+        original_url=item.original_url,
+        title=item.title,
+        body_text=caption.text,
+        published_at=item.published_at,
+        author=item.author,
         raw_payload=payload,
     )
 

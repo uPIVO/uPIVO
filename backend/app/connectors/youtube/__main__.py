@@ -78,7 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     for item in fetch.items:
         published = item.published_at.isoformat() if item.published_at else ""
-        print(f"{item.external_id}\t{published}\t{item.original_url}\t{item.title or ''}")
+        captions = "yes" if item.raw_payload.get("transcript") else "no"
+        print(
+            f"{item.external_id}\t{published}\t{item.original_url}\t"
+            f"{item.title or ''}\tcaptions={captions}"
+        )
     return 0
 
 
@@ -89,7 +93,11 @@ def _print_fetch(fetch) -> None:
     )
     for item in fetch.items:
         published = item.published_at.isoformat() if item.published_at else ""
-        print(f"{item.external_id}\t{published}\t{item.original_url}\t{item.title or ''}")
+        captions = "yes" if item.raw_payload.get("transcript") else "no"
+        print(
+            f"{item.external_id}\t{published}\t{item.original_url}\t"
+            f"{item.title or ''}\tcaptions={captions}"
+        )
 
 
 if __name__ == "__main__":
