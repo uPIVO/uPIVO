@@ -32,7 +32,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
       - run: uv sync --locked --python 3.12
-      - run: uv run ruff check .
+      - run: uv run ruff check --config pyproject.toml . ../start.py
       - run: uv run pytest
       - run: uv run alembic upgrade head
       - run: uv run alembic check

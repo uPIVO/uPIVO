@@ -1,0 +1,4 @@
+# Только для компьютеров с Podman; backend использует backend/uv.lock.
+podman-compose==1.6.0
+python-dotenv==1.2.4
+PyYAML==6.0.3

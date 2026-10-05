@@ -8,7 +8,7 @@
 | FastAPI | REST API, валидация и автоматические Swagger/OpenAPI |
 | PostgreSQL | Основное долговременное хранилище публикаций и будущих настроек |
 | SQLAlchemy 2 | Python-модели, SQL-запросы, соединения и sessions |
-| Alembic | «Git для структуры базы данных»: последовательные версии схемы |
+| Alembic | Последовательные версии структуры базы данных |
 | Telethon | Python-клиент Telegram API для будущего сбора публикаций |
 | httpx | Скачивает страницу или обращается к внешнему HTTP API |
 | trafilatura | Извлекает основной текст статьи, убирая меню/рекламу/шум |
@@ -35,7 +35,7 @@ external source → collection → raw_payload → normalization → FeedItem
 
 Telegram API → Telethon → connectors/telegram → будущий FeedItem.
 Connector отвечает за доступ к источнику, normalization приводит данные к общей форме.
-Конкретные парсеры пока не реализованы; session-файлы не входят в Git.
+Конкретные парсеры пока не реализованы; session-файлы хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
 rawjson-extractor из Siftly. TypeScript не копируется; extractor требует отдельной задачи.

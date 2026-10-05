@@ -5,6 +5,9 @@
 Стек: Python 3.12, uv, FastAPI, PostgreSQL, SQLAlchemy 2, Alembic.
 Redis и Celery подготовлены; worker/beat запускаются опционально.
 
+Новичкам: **[Начни здесь — готовое окружение для разработки](START_HERE.md)**.
+Из корня на любой системе: `uv run --no-project --python 3.12 start.py`.
+
 ## Запуск
 
 Нужен Docker с Compose. Из корня проекта:

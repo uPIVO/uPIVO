@@ -1,9 +1,17 @@
 # Первый запуск проекта с нуля
 
-Нужны Git, Docker Engine с Compose v2+ или Docker Desktop. Для локального Python
+Для новичков есть [START_HERE.md](../START_HERE.md) и запуск одной командой:
+`uv run --no-project --python 3.12 start.py`. Он поддерживает Docker/Compose и Podman,
+создаёт `.env`, устанавливает зависимости, запускает БД/Redis и применяет миграции.
+При Podman Compose устанавливается локально в `.tools/compose`.
+Нужен uv; Python 3.12 он подберёт или скачает сам. При прямом запуске через
+`python3 start.py` / `py start.py` скрипт требует Python 3.10+.
+Ручные способы установки и запуска приведены ниже.
+
+Нужны Docker Engine с Compose v2+ или Docker Desktop. Для локального Python
 и тестов нужен uv 0.12.22 и Python 3.12; uv может скачать Python сам.
 Python 3.13 пока не поддерживается. PostgreSQL 16 и Redis 7 берутся из Compose.
-Команды ниже выполняются после `git clone <URL_репозитория>` и перехода в корень.
+Скачайте проект удобным способом. Команды ниже выполняются из его корневой папки.
 
 Установка uv: https://docs.astral.sh/uv/getting-started/installation/
 Linux/macOS (явно запускается пользователем):
@@ -100,7 +108,8 @@ APP_HOST/APP_PORT используются `uv run python -m app.main` и Docker
 TELEGRAM_API_ID и TELEGRAM_API_HASH каждый разработчик получает отдельно
 через https://my.telegram.org или безопасным способом от тимлида.
 До задачи Telegram они могут оставаться пустыми. Session — чувствительные данные.
-Реальные ключи, api_hash, session-файлы и `.env` нельзя коммитить или логировать.
+Реальные ключи, api_hash, session-файлы и `.env` содержат секреты: храните их локально
+и не выводите в логи.
 LLM_PROVIDER/LLM_API_KEY сейчас пустые; provider не выбран.
 
 ## Опциональные workers

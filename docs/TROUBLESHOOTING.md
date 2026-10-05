@@ -1,6 +1,10 @@
 # Типовые проблемы
 
 Команды Compose выполняются в корне, uv — в backend.
+`start.py` выполняется из корня; он сам выбирает директории для этих команд.
+На Podman вместо `docker compose` в командах диагностики используйте
+`.tools/compose/bin/podman-compose` (Windows: `.tools/compose/Scripts/podman-compose.exe`),
+либо установленный `podman-compose`.
 
 | Симптом | Вероятная причина | Решение |
 | --- | --- | --- |
