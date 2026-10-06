@@ -37,8 +37,12 @@ external source → collection → raw_payload → normalization → FeedItem
 Telegram API → Telethon → connectors/telegram → будущий FeedItem.
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
-Это сбор сырья, не normalization и не дайджест.
-Connector отвечает за доступ к источнику, normalization приводит данные к общей форме.
+Это сбор сырья, не дайджест.
+Connector отвечает за доступ к источнику.
+`app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
+original_url / author / published_at, считает `content_hash` и ставит
+processed или failed. `raw_payload` не переписывается. CLI:
+`python -m app.processing`.
 Session-файлы Telegram хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
@@ -58,7 +62,8 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 - `services`: будущие сценарии продукта, добавлять по задачам.
 - `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
-- `processing`: normalization, extraction и дальнейшая обработка.
+- `processing`: нормализация `raw_payload` → поля FeedItem
+  (`python -m app.processing`); extractors пока зарезервированы.
 - `ai`: provider-neutral интерфейс.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
 - `auth`: зарезервировано; схема авторизации не выбрана.
