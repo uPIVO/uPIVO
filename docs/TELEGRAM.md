@@ -24,7 +24,7 @@ Initial collection returns the latest 50 logical posts by default; `--limit` cha
 uv run python -m scripts.telegram_sync @example --limit 50
 ```
 
-Incremental collection requires a caller-supplied cursor and returns **all** logical posts after that message ID. `--limit` applies only to the initial latest-post request. The console prints the highest returned message ID as a value the caller may persist elsewhere; the connector does not retain or advance it.
+Incremental collection requires a caller-supplied cursor and returns **all** logical posts after that message ID. `--limit` applies only to the initial latest-post request. If the cursor bisects an album, the oldest returned album is completed by scanning backward until the preceding different group; its `message_ids` and caption can therefore include components at or below the cursor, while `message_id` remains the album's maximum ID. The console prints the highest returned message ID as a value the caller may persist elsewhere; the connector does not retain or advance it.
 
 ```bash
 uv run python -m scripts.telegram_sync @example --after-message-id 104

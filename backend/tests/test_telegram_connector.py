@@ -51,8 +51,9 @@ class FakeTelegramClient:
 
         async def iterate():
             min_id = kwargs.get("min_id", 0)
+            max_id = kwargs.get("max_id")
             for item in self.messages:
-                if item.id > min_id:
+                if item.id > min_id and (max_id is None or item.id < max_id):
                     yield item
 
         return iterate()
@@ -125,6 +126,32 @@ def test_new_fetch_returns_all_after_external_cursor_in_chronological_order():
     assert posts[1].message_ids == (202, 203)
     assert api.resolved_sources == ["testchannel"]
     assert api.iter_calls[0][1] == {"min_id": 200}
+
+
+def test_incremental_fetch_reconstructs_album_bisected_by_external_cursor():
+    api = FakeTelegramClient(
+        [
+            message(205, "newest"),
+            message(203, "last caption", grouped_id=9),
+            message(202, "first caption", grouped_id=9),
+            message(201, "previous post"),
+        ]
+    )
+
+    async def fetch():
+        async with TelegramConnector(client=api) as connector:
+            return await connector.fetch_new_posts("@testchannel", after_message_id=202)
+
+    posts = asyncio.run(fetch())
+
+    assert [post.external_id for post in posts] == ["album:9", "message:205"]
+    assert posts[0].message_id == 203
+    assert posts[0].message_ids == (202, 203)
+    assert posts[0].text == "first caption\nlast caption"
+    assert [call[1] for call in api.iter_calls] == [
+        {"min_id": 202},
+        {"max_id": 203},
+    ]
 
 
 def test_private_channel_access_error_and_logs_do_not_include_raw_exception_or_input(caplog):

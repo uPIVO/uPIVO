@@ -1,6 +1,7 @@
 import logging
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -229,7 +230,10 @@ class TelegramConnector:
         channel = await self.resolve_channel(source)
         try:
             messages = self._client.iter_messages(channel.entity, min_id=after_message_id)
-            return await _collect_logical_posts(messages)
+            posts = await _collect_logical_posts(messages)
+            if posts and posts[0].grouped_id is not None:
+                posts[0] = await _complete_boundary_album(self._client, channel.entity, posts[0])
+            return posts
         except Exception as exc:
             if not _is_channel_access_error(exc):
                 raise TelegramConnectorError("Telegram post retrieval failed.") from None
@@ -256,6 +260,42 @@ class TelegramConnector:
     @staticmethod
     def _log_channel_access_failure(exc: Exception) -> None:
         logger.warning("Telegram channel access failed (error_type=%s)", type(exc).__name__)
+
+
+async def _complete_boundary_album(client: Any, channel: Any, post: TelegramPost) -> TelegramPost:
+    first_message_id = post.message_ids[0]
+    earlier_messages = []
+    async for message in client.iter_messages(channel, max_id=first_message_id):
+        if (
+            getattr(message, "action", None) is not None
+            or not _is_post(message)
+            or getattr(message, "grouped_id", None) != post.grouped_id
+        ):
+            break
+        earlier_messages.append(message)
+    if not earlier_messages:
+        return post
+
+    ordered_earlier = sorted(earlier_messages, key=lambda message: message.id)
+    earlier_captions = []
+    for message in ordered_earlier:
+        text = getattr(message, "message", None) or getattr(message, "text", None) or ""
+        if text.strip():
+            earlier_captions.append(text.strip())
+    message_ids = tuple(
+        sorted(set(post.message_ids).union(message.id for message in ordered_earlier))
+    )
+    timestamps = [_as_utc(message.date) for message in ordered_earlier]
+    text_parts = earlier_captions + ([post.text] if post.text else [])
+    return replace(
+        post,
+        message_id=max(message_ids),
+        message_ids=message_ids,
+        text="\n".join(text_parts),
+        published_at=min([post.published_at, *timestamps]),
+        is_forward=post.is_forward
+        or any(getattr(message, "fwd_from", None) is not None for message in ordered_earlier),
+    )
 
 
 async def _collect_logical_posts(messages: Any, *, limit: int | None = None) -> list[TelegramPost]:
