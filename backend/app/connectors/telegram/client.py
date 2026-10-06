@@ -245,20 +245,30 @@ class TelegramConnector:
         source: str | ResolvedTelegramChannel,
         *,
         after_message_id: int,
+        limit: int | None = None,
     ) -> list[TelegramPost]:
         self._require_connected()
         if not isinstance(after_message_id, int) or after_message_id < 0:
             raise ValueError("after_message_id must be a non-negative integer")
+        if limit is not None and (not isinstance(limit, int) or limit <= 0):
+            raise ValueError("Параметр limit должен быть положительным числом.")
         channel = await self.resolve_channel(source)
         try:
-            messages = self._client.iter_messages(channel.entity, min_id=after_message_id)
-            posts = await _collect_logical_posts(messages)
+            if limit is None:
+                messages = self._client.iter_messages(channel.entity, min_id=after_message_id)
+            else:
+                messages = self._client.iter_messages(
+                    channel.entity, min_id=after_message_id, reverse=True
+                )
+            posts = await _collect_logical_posts(messages, limit=limit)
             if posts and posts[0].grouped_id is not None:
                 posts[0] = await _complete_boundary_album(self._client, channel.entity, posts[0])
             return posts
         except Exception as exc:
             if not _is_channel_access_error(exc):
-                raise TelegramConnectorError("Telegram post retrieval failed.") from None
+                raise TelegramConnectorError(
+                    "Не удалось получить публикации Telegram; технические подробности скрыты."
+                ) from None
             self._log_channel_access_failure(exc)
             raise _channel_access_error() from None
 

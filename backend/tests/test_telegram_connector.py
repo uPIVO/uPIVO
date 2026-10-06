@@ -72,9 +72,15 @@ class FakeTelegramClient:
         async def iterate():
             min_id = kwargs.get("min_id", 0)
             max_id = kwargs.get("max_id")
-            for item in self.messages:
-                if item.id > min_id and (max_id is None or item.id < max_id):
-                    yield item
+            messages = [
+                item
+                for item in self.messages
+                if item.id > min_id and (max_id is None or item.id < max_id)
+            ]
+            if kwargs.get("reverse"):
+                messages.sort(key=lambda item: item.id)
+            for item in messages:
+                yield item
 
         return iterate()
 
@@ -172,6 +178,45 @@ def test_incremental_fetch_reconstructs_album_bisected_by_external_cursor():
         {"min_id": 202},
         {"max_id": 203},
     ]
+
+
+def test_incremental_limit_returns_first_logical_posts_and_completes_boundary_album():
+    api = FakeTelegramClient(
+        [
+            message(206, "newest backlog post"),
+            message(205, "next backlog post"),
+            message(204, "second logical post"),
+            message(203, "last album caption", grouped_id=9),
+            message(202, "first album caption", grouped_id=9),
+            message(201, "previous post"),
+        ]
+    )
+
+    async def fetch():
+        async with TelegramConnector(client=api) as connector:
+            return await connector.fetch_new_posts("@testchannel", after_message_id=202, limit=2)
+
+    posts = asyncio.run(fetch())
+
+    assert [post.external_id for post in posts] == ["album:9", "message:204"]
+    assert posts[0].message_ids == (202, 203)
+    assert posts[0].text == "first album caption\nlast album caption"
+    assert [call[1] for call in api.iter_calls] == [
+        {"min_id": 202, "reverse": True},
+        {"max_id": 203},
+    ]
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_incremental_limit_must_be_positive(limit):
+    api = FakeTelegramClient()
+
+    async def fetch():
+        async with TelegramConnector(client=api) as connector:
+            await connector.fetch_new_posts("@testchannel", after_message_id=200, limit=limit)
+
+    with pytest.raises(ValueError, match="limit"):
+        asyncio.run(fetch())
 
 
 def test_private_channel_access_error_and_logs_do_not_include_raw_exception_or_input(caplog):
