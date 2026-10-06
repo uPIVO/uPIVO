@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
+from app.connectors.telegram.credentials import TelegramSessionCredentials
 from app.connectors.telegram.errors import (
     TelegramAuthorizationError,
     TelegramChannelAccessError,
@@ -136,29 +137,22 @@ class TelegramConnector:
                 settings = get_settings()
             except Exception:
                 raise TelegramConfigurationError(
-                    "Could not load Telegram settings from the local .env."
+                    "Не удалось загрузить настройки Telegram из корневого .env."
                 ) from None
 
-        api_id_value = settings.telegram_api_id
-        api_hash = settings.telegram_api_hash.get_secret_value()
-        session = settings.telegram_session.get_secret_value()
-        if not api_id_value or not api_hash or not session:
-            raise TelegramConfigurationError(
-                "Set TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_SESSION in the local .env."
-            )
-        try:
-            api_id = int(api_id_value)
-        except (TypeError, ValueError):
-            raise TelegramConfigurationError("TELEGRAM_API_ID must be an integer.") from None
-
+        credentials = TelegramSessionCredentials.from_settings(settings)
         try:
             from telethon import TelegramClient
             from telethon.sessions import StringSession
 
-            return TelegramClient(StringSession(session), api_id, api_hash)
+            return TelegramClient(
+                StringSession(credentials.session.get_secret_value()),
+                credentials.api_id,
+                credentials.api_hash.get_secret_value(),
+            )
         except Exception:
             raise TelegramConfigurationError(
-                "Could not initialize the Telegram client; check local Telegram configuration."
+                "Не удалось создать клиент Telethon; проверьте локальные настройки Telegram."
             ) from None
 
     async def _disconnect_quietly(self) -> None:

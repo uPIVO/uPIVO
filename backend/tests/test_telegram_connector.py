@@ -174,6 +174,22 @@ def test_private_channel_access_error_and_logs_do_not_include_raw_exception_or_i
     assert api.resolved_sources == ["private_channel_token"]
 
 
+def test_injected_client_does_not_load_application_settings(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.config.get_settings",
+        lambda: pytest.fail("Тестовый клиент не должен загружать настройки окружения"),
+    )
+    api = FakeTelegramClient()
+
+    async def resolve():
+        async with TelegramConnector(client=api) as connector:
+            return await connector.resolve_channel("@testchannel")
+
+    channel = asyncio.run(resolve())
+
+    assert channel.channel_id == 42
+
+
 def test_unauthorized_session_fails_without_starting_interactive_login():
     api = FakeTelegramClient(authorized=False)
 
