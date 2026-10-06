@@ -5,11 +5,25 @@ from types import SimpleNamespace
 import pytest
 
 from app.connectors.telegram.client import TelegramConnector
-from app.connectors.telegram.errors import TelegramAuthorizationError, TelegramChannelAccessError
+from app.connectors.telegram.errors import (
+    TelegramAuthorizationError,
+    TelegramChannelAccessError,
+    TelegramConnectorError,
+)
+from app.connectors.telegram.models import TelegramChannelInfo
 
 
 class FakeTelegramClient:
-    def __init__(self, messages=(), *, authorized=True, entity=None, entity_error=None, dialogs=()):
+    def __init__(
+        self,
+        messages=(),
+        *,
+        authorized=True,
+        entity=None,
+        entity_error=None,
+        dialogs=(),
+        dialog_error=None,
+    ):
         self.messages = list(messages)
         self.authorized = authorized
         self.entity = entity or SimpleNamespace(
@@ -17,9 +31,11 @@ class FakeTelegramClient:
         )
         self.entity_error = entity_error
         self.dialogs = list(dialogs)
+        self.dialog_error = dialog_error
         self.connected = False
         self.resolved_sources = []
         self.iter_calls = []
+        self.iter_dialog_calls = []
 
     def is_connected(self):
         return self.connected
@@ -39,8 +55,12 @@ class FakeTelegramClient:
             raise self.entity_error
         return self.entity
 
-    def iter_dialogs(self):
+    def iter_dialogs(self, **kwargs):
+        self.iter_dialog_calls.append(kwargs)
+
         async def iterate():
+            if self.dialog_error is not None:
+                raise self.dialog_error
             for dialog in self.dialogs:
                 yield dialog
 
@@ -172,6 +192,72 @@ def test_private_channel_access_error_and_logs_do_not_include_raw_exception_or_i
     assert secret_input not in caplog.text
     assert "secret session detail" not in caplog.text
     assert api.resolved_sources == ["private_channel_token"]
+
+
+def test_list_broadcast_channels_returns_all_with_native_marked_ids():
+    dialogs = []
+    expected = []
+    marked_ids = range(-1001234567890, -1001234567991, -1)
+    for index, marked_id in enumerate(marked_ids):
+        entity_title = f"Название сущности {index}"
+        entity = SimpleNamespace(
+            id=12345 + index,
+            title=entity_title,
+            broadcast=True,
+            username=None if index == 1 else f"kanal_{index}",
+        )
+        dialog_name = {0: "Публичный канал", 1: "Приватный канал"}.get(index)
+        dialogs.append(SimpleNamespace(id=marked_id, name=dialog_name, entity=entity))
+        expected.append(
+            TelegramChannelInfo(
+                marked_id=marked_id,
+                title=dialog_name or entity_title,
+            )
+        )
+    dialogs.extend(
+        [
+            SimpleNamespace(
+                id=-1009876543210,
+                name="Супергруппа",
+                entity=SimpleNamespace(
+                    id=9876543210, title="Супергруппа", broadcast=False, megagroup=True
+                ),
+            ),
+            SimpleNamespace(
+                id=-12345,
+                name="Обычная группа",
+                entity=SimpleNamespace(id=12345, title="Обычная группа"),
+            ),
+        ]
+    )
+    api = FakeTelegramClient(dialogs=dialogs)
+
+    async def list_channels():
+        async with TelegramConnector(client=api) as connector:
+            return await connector.list_broadcast_channels()
+
+    channels = asyncio.run(list_channels())
+
+    assert channels == expected
+    assert len(channels) == 101
+    assert api.iter_dialog_calls == [{"limit": None}]
+
+
+def test_list_broadcast_channels_sanitizes_errors_and_logs_only_type(caplog):
+    secret_detail = "секретная-подробность"
+    api = FakeTelegramClient(dialog_error=ValueError(secret_detail))
+
+    async def list_channels():
+        async with TelegramConnector(client=api) as connector:
+            return await connector.list_broadcast_channels()
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(TelegramConnectorError) as caught:
+            asyncio.run(list_channels())
+
+    assert str(caught.value) == "Не удалось получить список каналов Telegram."
+    assert "Не удалось получить список каналов Telegram (тип ошибки: ValueError)" in caplog.text
+    assert secret_detail not in caplog.text
 
 
 def test_injected_client_does_not_load_application_settings(monkeypatch):

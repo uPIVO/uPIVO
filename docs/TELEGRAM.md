@@ -18,6 +18,22 @@ uv run python -m scripts.generate_telegram_session
 
 Помощник запросит номер телефона, код входа Telegram и, если потребуется, пароль двухфакторной аутентификации. Он сохраняет StringSession непосредственно в существующий корневой `.env`, оставляет остальные настройки без изменений, ограничивает доступ к файлу владельцем там, где это поддерживается, и никогда не выводит сессию. Не передавайте сгенерированную сессию и не добавляйте её в Git: она равнозначна учётным данным аккаунта. Коннектор не начинает интерактивный вход — сначала создайте сессию.
 
+## Список каналов аккаунта
+
+После создания сессии выполните из каталога `backend/`:
+
+```bash
+uv run python -m scripts.list_telegram_channels
+```
+
+Команда выводит названия и полные ID всех публичных и приватных каналов из диалогов аккаунта, включая архивированные. Обычные группы и супергруппы не включаются. ID уже имеет формат Telethon (`-100…`); его можно передать коннектору без преобразования. Значения сессии и API-ключей не выводятся.
+
+```bash
+uv run python -m scripts.telegram_sync --limit 5 -- -1001234567890
+```
+
+Замените пример ID значением из списка. Разделитель `--` отделяет отрицательный ID от опций командной строки.
+
 ## Чтение публикаций канала
 
 После установки зависимостей выполняйте команды из каталога `backend/`. Источником может быть имя канала (`@example` или `example`), URL канала (`https://t.me/example` или `https://t.me/s/example`), полный ID канала в формате Telethon, например `-1001234567890`, или приватная ссылка `https://t.me/c/<id>` на канал, участником которого уже является аккаунт.
@@ -47,7 +63,7 @@ uv run python -m scripts.telegram_sync @example --after-message-id 104
 Из каталога `backend/`:
 
 ```bash
-pytest -q tests/test_telegram_credentials.py tests/test_telegram_connector.py tests/test_telegram_session.py tests/test_telegram_sync_cli.py
+pytest -q tests/test_telegram_credentials.py tests/test_telegram_connector.py tests/test_list_telegram_channels_cli.py tests/test_telegram_session.py tests/test_telegram_sync_cli.py
 ```
 
 В этих тестах используется фиктивный клиент Telegram и временные `.env`-файлы; запросы к Telegram не выполняются, файл `.env` разработчика не читается.

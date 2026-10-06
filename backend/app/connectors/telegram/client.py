@@ -13,7 +13,11 @@ from app.connectors.telegram.errors import (
     TelegramConfigurationError,
     TelegramConnectorError,
 )
-from app.connectors.telegram.models import ResolvedTelegramChannel, TelegramPost
+from app.connectors.telegram.models import (
+    ResolvedTelegramChannel,
+    TelegramChannelInfo,
+    TelegramPost,
+)
 
 logger = logging.getLogger(__name__)
 _USERNAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
@@ -195,6 +199,30 @@ class TelegramConnector:
             title=str(getattr(entity, "title", "") or ""),
             entity=entity,
         )
+
+    async def list_broadcast_channels(self) -> list[TelegramChannelInfo]:
+        self._require_connected()
+        channels: list[TelegramChannelInfo] = []
+        try:
+            async for dialog in self._client.iter_dialogs(limit=None):
+                entity = getattr(dialog, "entity", None)
+                if getattr(entity, "broadcast", False) is not True:
+                    continue
+                channels.append(
+                    TelegramChannelInfo(
+                        marked_id=dialog.id,
+                        title=str(
+                            getattr(dialog, "name", None) or getattr(entity, "title", None) or ""
+                        ),
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "Не удалось получить список каналов Telegram (тип ошибки: %s)",
+                type(exc).__name__,
+            )
+            raise TelegramConnectorError("Не удалось получить список каналов Telegram.") from None
+        return channels
 
     async def fetch_latest_posts(
         self, source: str | ResolvedTelegramChannel, *, limit: int = 50

@@ -23,3 +23,11 @@ class ResolvedTelegramChannel:
     channel_id: int
     title: str
     entity: Any = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramChannelInfo:
+    """Название канала Telegram и его полный ID Telethon."""
+
+    marked_id: int
+    title: str
