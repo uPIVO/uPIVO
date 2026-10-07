@@ -1,7 +1,8 @@
 # Архитектура Upivo
 
 Сейчас это один backend, без продуктовых HTTP-endpoint. Миграция `0002` добавляет
-таблицы `sources` и `feed_items` для сырого сбора. Остальные этапы обработки —
+таблицы `sources` и `feed_items` для сырого сбора; `0003` — `users` и `user_sources`
+(какие источники включил конкретный пользователь). Остальные этапы обработки —
 план для отдельных задач, а не уже реализованная функциональность.
 
 | Технология | Зачем Upivo |
@@ -38,6 +39,8 @@ Telegram API → Telethon → connectors/telegram → будущий FeedItem.
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
+`python -m app.services --user` собирает только источники из `user_sources`
+этого пользователя; запись всё равно в общие `sources` / `feed_items`.
 Connector отвечает за доступ к источнику.
 `app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
 original_url / author / published_at, считает `content_hash` и ставит
@@ -57,9 +60,10 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 - `api`: HTTP-маршруты; сейчас только `/health` и `/health/db` (SELECT 1).
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `Source` / `FeedItem` и enum `source_type` (включая youtube).
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и enum `source_type` (включая youtube).
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
-- `services`: будущие сценарии продукта, добавлять по задачам.
+- `services`: сбор под пользователя (`python -m app.services --user`);
+  `sources` общие, `user_sources` — какие из них включены у этого пользователя.
 - `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: нормализация `raw_payload` → поля FeedItem
