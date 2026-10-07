@@ -80,3 +80,25 @@ uv run python -m app.connectors.youtube "https://www.youtube.com/@GoogleDevelope
 если текст уже лежит в `raw_payload.transcript`. Пустой канал — source и 0 записей.
 Неверный URL завершает процесс с кодом 2; сеть/HTTP — с кодом 1.
 Не принимаются search, playlist, watch и OAuth.
+
+## Нормализация контента
+
+После сбора сырых `feed_items` приводит `raw_payload` к полям
+title / body_text / original_url / author / published_at и считает `content_hash`
+(SHA-256 нормализованных title+body, 64 hex-символа). `raw_payload` не меняется.
+Статус: pending → processed или failed. Пустой/битый payload и отсутствие URL —
+failed; title/author/дата могут быть пустыми.
+
+Пример без БД, из `backend/`:
+
+```bash
+uv run python -m app.processing --fixture tests/fixtures/normalize/sample.json
+```
+
+Pending-строки в PostgreSQL (нужны миграции, `alembic upgrade head`):
+
+```bash
+uv run python -m app.processing
+```
+
+`--dry-run` печатает результат без commit. `--limit N` и `--item-id ID` сужают выборку.

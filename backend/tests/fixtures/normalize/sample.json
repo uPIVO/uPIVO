@@ -1,0 +1,23 @@
+[
+  {
+    "kind": "youtube_rss_entry",
+    "video_id": "8Xv5BLnXzgI",
+    "channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+    "title": "  Building a voice-to-print mirror with Gemini  ",
+    "link": "https://www.youtube.com/watch?v=8Xv5BLnXzgI",
+    "published": "2026-10-01T19:00:13+00:00",
+    "author": "Google for Developers",
+    "description": "<p>Gayatri talks about Gemini.</p>",
+    "transcript": "Hello from the transcript.\n\nThis is caption line two."
+  },
+  {
+    "title": "Generic article",
+    "url": "https://example.com/post",
+    "body": "Hello   world.\n\n\nSecond   paragraph.",
+    "author": "Ada",
+    "published_at": "2026-09-30T12:00:00Z"
+  },
+  {
+    "title": "Missing link, cannot normalize"
+  }
+]
