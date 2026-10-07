@@ -16,6 +16,7 @@ from app.connectors.reddit.errors import (
 from app.connectors.reddit.models import RedditPost
 from app.processing.reddit import map_post
 from app.services.reddit import sync_reddit
+from scripts import reddit_sync
 from scripts.collect_reddit import main as collect_reddit_main
 
 
@@ -325,6 +326,95 @@ class FakeSyncClient:
     def fetch_range(self, subreddit, after, before):
         self.range_bounds.append((after, before))
         return self.posts
+
+
+def test_preview_default_output_remains_compact(monkeypatch, capsys):
+    post = SimpleNamespace(
+        created_utc=datetime(2024, 1, 1),
+        title="Заголовок",
+        permalink="https://www.reddit.com/r/test/comments/1/",
+        selftext="полный текст",
+    )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def fetch_latest(self, subreddit, limit):
+            return [post]
+
+    monkeypatch.setattr(sys, "argv", ["reddit_sync", "python"])
+    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    assert reddit_sync.main() == 0
+    assert capsys.readouterr().out == (
+        "[2024-01-01T00:00:00] Заголовок\nhttps://www.reddit.com/r/test/comments/1/\n\n"
+    )
+
+
+def test_preview_full_prints_complete_multiline_selftext(monkeypatch, capsys):
+    text = "первая строка\n" + "а" * 400 + "\nпоследняя строка"
+    post = SimpleNamespace(
+        created_utc=datetime(2024, 1, 1),
+        title="Заголовок",
+        permalink="https://www.reddit.com/r/test/comments/1/",
+        selftext=text,
+    )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def fetch_latest(self, subreddit, limit):
+            return [post]
+
+    monkeypatch.setattr(sys, "argv", ["reddit_sync", "python", "--full"])
+    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    assert reddit_sync.main() == 0
+    assert capsys.readouterr().out == (
+        "[2024-01-01T00:00:00] Заголовок\n"
+        "https://www.reddit.com/r/test/comments/1/\n" + text + "\n\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("selftext", "notice"),
+    [
+        ("", "Текст поста отсутствует в ответе Arctic Shift."),
+        ("  \n ", "Текст поста отсутствует в ответе Arctic Shift."),
+        ("[deleted]", "Вместо текста в архивном ответе: [deleted]."),
+        (" [removed] \n", "Вместо текста в архивном ответе: [removed]."),
+    ],
+)
+def test_preview_full_reports_empty_and_archive_placeholders(monkeypatch, capsys, selftext, notice):
+    post = SimpleNamespace(
+        created_utc=datetime(2024, 1, 1),
+        title="Заголовок",
+        permalink="https://www.reddit.com/r/test/comments/1/",
+        selftext=selftext,
+    )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def fetch_latest(self, subreddit, limit):
+            return [post]
+
+    monkeypatch.setattr(sys, "argv", ["reddit_sync", "python", "--full"])
+    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    assert reddit_sync.main() == 0
+    assert capsys.readouterr().out == (
+        f"[2024-01-01T00:00:00] Заголовок\nhttps://www.reddit.com/r/test/comments/1/\n{notice}\n\n"
+    )
 
 
 def test_collect_cli_rejects_negative_overlap(monkeypatch, capsys):
