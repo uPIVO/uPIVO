@@ -17,11 +17,16 @@ def main() -> int:
         "--overlap-seconds",
         type=int,
         default=3600,
-        help="Период перекрытия для поздно появившихся публикаций",
+        help=(
+            "Перекрытие при инкрементальном сборе в секундах "
+            "(по умолчанию 3600; при 0 остаётся секундный повтор границы)"
+        ),
     )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit должен быть положительным")
+    if args.overlap_seconds < 0:
+        parser.error("--overlap-seconds не может быть отрицательным")
     try:
         result = sync_reddit(
             sessionmaker(get_engine()),

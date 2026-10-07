@@ -1,3 +1,4 @@
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from app.connectors.reddit.errors import (
 from app.connectors.reddit.models import RedditPost
 from app.processing.reddit import map_post
 from app.services.reddit import sync_reddit
+from scripts.collect_reddit import main as collect_reddit_main
 
 
 def payload(post_id: int | str, second: int) -> dict:
@@ -179,6 +181,74 @@ def test_deadline_is_checked_after_stream_read():
     close_client(client)
 
 
+def test_http_422_exposes_only_safe_normalized_validation_detail():
+    client = make_client(
+        lambda _: httpx.Response(
+            422,
+            json={"detail": [{"msg": "invalid subreddit\nsecret=abc", "input": "do-not-show"}]},
+        )
+    )
+    with pytest.raises(RedditRequestError) as raised:
+        client.fetch_latest("test", 5)
+    message = str(raised.value)
+    assert "HTTP 422" in message
+    assert "invalid subreddit" in message
+    assert "do-not-show" not in message
+    assert "abc" not in message
+    assert "https://" not in message
+    assert "subreddit=python" not in message
+    assert "\n" not in message
+    close_client(client)
+
+
+def test_oversized_http_error_body_stops_read_and_keeps_status():
+    reads = []
+
+    class OversizedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            reads.append(1)
+            yield b"x" * 100
+            reads.append(2)
+            yield b"unread"
+
+    client = make_client(
+        lambda _: httpx.Response(422, stream=OversizedStream()), max_response_bytes=16
+    )
+    with pytest.raises(RedditRequestError) as raised:
+        client.fetch_latest("test", 5)
+    assert "HTTP 422" in str(raised.value)
+    assert "размер" in str(raised.value)
+    assert reads == [1]
+    close_client(client)
+
+
+def test_http_error_body_deadline_keeps_status():
+    def handler(_):
+        time.sleep(0.02)
+        return httpx.Response(422, json={"detail": "validation failed"})
+
+    client = make_client(handler, deadline_seconds=0.005)
+    with pytest.raises(RedditRequestError) as raised:
+        client.fetch_latest("test", 5)
+    assert "HTTP 422" in str(raised.value)
+    assert "срок чтения" in str(raised.value)
+    close_client(client)
+
+
+def test_malformed_http_error_body_is_sanitized_and_truncated():
+    body = b"not-json\x00 password=abc Authorization: Bearer private-token " + b"x" * 600
+    client = make_client(lambda _: httpx.Response(422, content=body), max_response_bytes=1024)
+    with pytest.raises(RedditRequestError) as raised:
+        client.fetch_latest("test", 5)
+    message = str(raised.value)
+    assert "HTTP 422" in message
+    assert "abc" not in message
+    assert "private-token" not in message
+    assert "\x00" not in message
+    assert len(message) < 400
+    close_client(client)
+
+
 class FakeSession:
     def __init__(self, scalar_results, *, execute_results=None, fail_insert=False):
         self.scalar_results = iter(scalar_results)
@@ -255,6 +325,14 @@ class FakeSyncClient:
     def fetch_range(self, subreddit, after, before):
         self.range_bounds.append((after, before))
         return self.posts
+
+
+def test_collect_cli_rejects_negative_overlap(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["collect_reddit", "python", "--overlap-seconds", "-1"])
+    with pytest.raises(SystemExit) as raised:
+        collect_reddit_main()
+    assert raised.value.code == 2
+    assert "--overlap-seconds не может быть отрицательным" in capsys.readouterr().err
 
 
 def test_empty_initial_scan_persists_initialized_cursor():

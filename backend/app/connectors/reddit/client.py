@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,6 +15,48 @@ def _parse_post(row: dict[str, Any]) -> RedditPost:
         return RedditPost.from_payload(row)
     except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
         raise RedditRequestError(f"Arctic Shift вернул некорректную публикацию: {exc}") from exc
+
+
+def _error_detail(body: bytes) -> str:
+    try:
+        value = json.loads(body)
+        parsed_json = True
+    except (ValueError, UnicodeDecodeError):
+        value = body.decode("utf-8", "replace")
+        parsed_json = False
+
+    def extract(item: Any) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, list):
+            parts = [extract(entry) for entry in item]
+            return "; ".join(part for part in parts if part)
+        if isinstance(item, dict):
+            for key in ("detail", "message", "error", "msg"):
+                if key in item:
+                    result = extract(item[key])
+                    if result:
+                        return result
+        return ""
+
+    text = extract(value)
+    if not text:
+        if parsed_json:
+            return ""
+        text = body.decode("utf-8", "replace")
+    text = "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in text)
+    text = re.sub(
+        r"(?i)(authorization[ \t]*[=:][ \t]*)(?:bearer[ \t]+)?[^ \t,;]+",
+        r"\1[скрыто]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(password|passwd|token|authorization|secret|api[_-]?key)[ \t]*([=:])[ \t]*[^ \t,;]+",
+        r"\1\2[скрыто]",
+        text,
+    )
+    text = re.sub(r"https?://[^ \"']+", "[URL]", text)
+    return " ".join(text.split())[:300]
 
 
 class RedditClient:
@@ -53,6 +96,27 @@ class RedditClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def _read_bounded_body(self, response: httpx.Response) -> tuple[bytes | None, str | None]:
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_response_bytes:
+                    return None, "размер тела ответа превышает установленный предел"
+            except ValueError:
+                pass
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in response.iter_bytes():
+            if time.monotonic() - self._started >= self.deadline_seconds:
+                return None, "истёк срок чтения ответа"
+            size += len(chunk)
+            if size > self.max_response_bytes:
+                return None, "размер тела ответа превышает установленный предел"
+            chunks.append(chunk)
+        if time.monotonic() - self._started >= self.deadline_seconds:
+            return None, "истёк срок чтения ответа"
+        return b"".join(chunks), None
+
     def _search(
         self,
         subreddit: str,
@@ -74,33 +138,36 @@ class RedditClient:
             params["after"] = after.replace(tzinfo=UTC).isoformat()
         if before is not None:
             params["before"] = before.replace(tzinfo=UTC).isoformat()
-        timeout = min(self.timeout, remaining)
         self._requests += 1
         try:
             with self.http_client.stream(
-                "GET", self.URL, params=params, timeout=timeout
+                "GET", self.URL, params=params, timeout=min(self.timeout, remaining)
             ) as response:
                 self._responses += 1
-                response.raise_for_status()
-                content_length = response.headers.get("content-length")
-                if content_length is not None and int(content_length) > self.max_response_bytes:
-                    raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
-                chunks = []
-                size = 0
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > self.max_response_bytes:
-                        raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
-                    if time.monotonic() - self._started >= self.deadline_seconds:
-                        raise RedditRequestError("Превышен срок получения данных Reddit")
-                    chunks.append(chunk)
-                if time.monotonic() - self._started >= self.deadline_seconds:
+                status = response.status_code
+                if not response.is_success:
+                    try:
+                        body, read_error = self._read_bounded_body(response)
+                    except (httpx.HTTPError, ValueError):
+                        body, read_error = None, "тело ошибки не удалось прочитать"
+                    detail = _error_detail(body) if body else ""
+                    context = detail or read_error
+                    suffix = f": {context}" if context else ""
+                    raise RedditRequestError(f"Arctic Shift вернул HTTP {status}{suffix}")
+                body, read_error = self._read_bounded_body(response)
+                if read_error == "истёк срок чтения ответа":
                     raise RedditRequestError("Превышен срок получения данных Reddit")
-            data = json.loads(b"".join(chunks))
+                if read_error:
+                    raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
+            data = json.loads(body or b"")
         except RedditRequestError:
             raise
-        except (httpx.HTTPError, ValueError) as exc:
-            raise RedditRequestError(f"Не удалось получить данные Arctic Shift: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise RedditRequestError(
+                f"Не удалось выполнить запрос к Arctic Shift ({type(exc).__name__})"
+            ) from exc
+        except ValueError as exc:
+            raise RedditRequestError("Arctic Shift вернул некорректный JSON") from exc
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise RedditRequestError("Arctic Shift вернул ответ без массива data")
         rows = data["data"]
