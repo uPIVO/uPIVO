@@ -3,10 +3,12 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from app.api.health import router
+from app.api.endpoints.habr import router as habr_router
+from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_engine
+from app.api.habr import router as habr_router
 
 
 @asynccontextmanager
@@ -17,8 +19,15 @@ async def lifespan(app: FastAPI):
         get_engine().dispose()
 
 
-app = FastAPI(title="Upivo Backend", version="0.1.0", lifespan=lifespan)
-app.include_router(router)
+app = FastAPI(
+    title="Upivo Backend",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# Подключаем оба роутера:
+app.include_router(health_router)
+app.include_router(habr_router, prefix="/api")
 
 if __name__ == "__main__":
     settings = get_settings()

@@ -5,6 +5,10 @@ from app import models  # noqa: F401 -- registers future model metadata
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.base import Base
+from app.db.base import Base
+import app.models  # Чтобы модель попала в Base.metadata
+
+target_metadata = Base.metadata
 
 configure_logging(get_settings().log_level)
 target_metadata = Base.metadata
