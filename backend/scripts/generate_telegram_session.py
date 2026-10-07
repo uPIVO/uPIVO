@@ -9,6 +9,17 @@ from app.connectors.telegram.errors import TelegramConfigurationError
 from app.connectors.telegram.session import save_string_session_to_env
 
 
+def _code_delivery_hint(sent_code: object) -> str:
+    delivery_type = type(getattr(sent_code, "type", None)).__name__
+    if delivery_type == "SentCodeTypeApp":
+        return "Код отправлен в проверенный чат Telegram на активном устройстве."
+    if delivery_type == "SentCodeTypeSms":
+        return "Код отправлен по SMS."
+    if delivery_type == "SentCodeTypeEmailCode":
+        return "Код отправлен на почту, привязанную к Telegram."
+    return "Telegram принял запрос кода; проверьте активные устройства, SMS и почту."
+
+
 async def generate_local_session(
     *,
     env_path: Path | None = None,
@@ -57,6 +68,7 @@ async def generate_local_session(
         if not phone:
             raise TelegramConfigurationError("Укажите номер телефона.")
         sent_code = await client.send_code_request(phone)
+        print(_code_delivery_hint(sent_code))
         code = secret_prompt("Код входа Telegram: ").strip()
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=sent_code.phone_code_hash)
