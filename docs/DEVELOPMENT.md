@@ -80,6 +80,14 @@ uv run python -m app.connectors.youtube "https://www.youtube.com/@GoogleDevelope
 Неверный URL завершает процесс с кодом 2; сеть/HTTP — с кодом 1.
 Не принимаются search, playlist, watch и OAuth.
 
+## Habr
+
+Предпросмотр свежих статей доступен через `GET /api/habr/preview?limit=3` после
+запуска API. Он загружает полный текст, а при недоступности статьи использует
+текст из списка публикаций. `HabrService` в `backend/app/services/habr.py` можно
+вызвать из backend-кода с обычной SQLAlchemy `Session`; он записывает статьи в
+общие таблицы `sources` и `feed_items`. Для предпросмотра база данных не нужна.
+
 ## Нормализация контента
 
 После сбора сырых `feed_items` приводит `raw_payload` к полям
