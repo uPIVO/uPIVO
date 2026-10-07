@@ -18,15 +18,20 @@ class PersistStats:
 
 
 def persist_fetch(
-    session: Session, fetch: FetchResult, *, now: datetime | None = None
+    session: Session,
+    fetch: FetchResult,
+    *,
+    now: datetime | None = None,
+    source: Source | None = None,
 ) -> PersistStats:
     stamp = now or datetime.now(UTC).replace(tzinfo=None)
-    source = session.scalar(
-        select(Source).where(
-            Source.type == SourceType.YOUTUBE,
-            Source.external_id == fetch.source_external_id,
+    if source is None:
+        source = session.scalar(
+            select(Source).where(
+                Source.type == SourceType.YOUTUBE,
+                Source.external_id == fetch.source_external_id,
+            )
         )
-    )
     if source is None:
         source = Source(
             type=SourceType.YOUTUBE,
@@ -40,6 +45,8 @@ def persist_fetch(
     else:
         source.name = _clip(fetch.source_name, 255) or source.name
         source.canonical_url = fetch.canonical_url
+        if fetch.source_external_id:
+            source.external_id = fetch.source_external_id
         source.last_synced_at = stamp
 
     existing_ids = [item.external_id for item in fetch.items]
