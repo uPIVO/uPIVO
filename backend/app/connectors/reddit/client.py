@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -6,6 +7,13 @@ import httpx
 
 from app.connectors.reddit.errors import RedditRequestError, RedditSaturatedWindowError
 from app.connectors.reddit.models import RedditPost
+
+
+def _parse_post(row: dict[str, Any]) -> RedditPost:
+    try:
+        return RedditPost.from_payload(row)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+        raise RedditRequestError(f"Arctic Shift вернул некорректную публикацию: {exc}") from exc
 
 
 class RedditClient:
@@ -19,12 +27,14 @@ class RedditClient:
         deadline_seconds: float = 90,
         max_requests: int = 120,
         max_responses: int = 120,
+        max_response_bytes: int = 5 * 1024 * 1024,
         http_client: httpx.Client | None = None,
     ) -> None:
         self.timeout = timeout
         self.deadline_seconds = deadline_seconds
         self.max_requests = max_requests
         self.max_responses = max_responses
+        self.max_response_bytes = max_response_bytes
         self.http_client = http_client or httpx.Client(timeout=timeout)
         self._owns_client = http_client is None
         self._started = 0.0
@@ -54,7 +64,8 @@ class RedditClient:
     ) -> list[dict[str, Any]]:
         if self._started == 0:
             self._started = time.monotonic()
-        if time.monotonic() - self._started >= self.deadline_seconds:
+        remaining = self.deadline_seconds - (time.monotonic() - self._started)
+        if remaining <= 0:
             raise RedditRequestError("Превышен срок получения данных Reddit")
         if self._requests >= self.max_requests or self._responses >= self.max_responses:
             raise RedditRequestError("Превышен лимит запросов Arctic Shift за запуск")
@@ -63,23 +74,45 @@ class RedditClient:
             params["after"] = after.replace(tzinfo=UTC).isoformat()
         if before is not None:
             params["before"] = before.replace(tzinfo=UTC).isoformat()
+        timeout = min(self.timeout, remaining)
         self._requests += 1
         try:
-            response = self.http_client.get(self.URL, params=params, timeout=self.timeout)
-            self._responses += 1
-            response.raise_for_status()
-            data = response.json()
+            with self.http_client.stream(
+                "GET", self.URL, params=params, timeout=timeout
+            ) as response:
+                self._responses += 1
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length is not None and int(content_length) > self.max_response_bytes:
+                    raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
+                chunks = []
+                size = 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > self.max_response_bytes:
+                        raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
+                    if time.monotonic() - self._started >= self.deadline_seconds:
+                        raise RedditRequestError("Превышен срок получения данных Reddit")
+                    chunks.append(chunk)
+                if time.monotonic() - self._started >= self.deadline_seconds:
+                    raise RedditRequestError("Превышен срок получения данных Reddit")
+            data = json.loads(b"".join(chunks))
+        except RedditRequestError:
+            raise
         except (httpx.HTTPError, ValueError) as exc:
             raise RedditRequestError(f"Не удалось получить данные Arctic Shift: {exc}") from exc
-        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
-            raise RedditRequestError("Arctic Shift вернул ответ неожиданного формата")
-        return data
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise RedditRequestError("Arctic Shift вернул ответ без массива data")
+        rows = data["data"]
+        if any(not isinstance(item, dict) for item in rows):
+            raise RedditRequestError("Arctic Shift вернул публикацию неожиданного формата")
+        return rows
 
     def fetch_latest(self, subreddit: str, limit: int = 50) -> list[RedditPost]:
         if limit < 1:
             raise ValueError("Лимит должен быть положительным")
         batch = self._search(subreddit, sort="desc", limit=min(self.PAGE_SIZE, limit))
-        posts = {post.id: post for post in map(RedditPost.from_payload, batch)}
+        posts = {post.id: post for post in map(_parse_post, batch)}
         if len(batch) < self.PAGE_SIZE or len(posts) >= limit:
             return sorted(
                 posts.values(), key=lambda post: (post.created_utc, post.id), reverse=True
@@ -87,15 +120,16 @@ class RedditClient:
 
         # Без offset продолжаем назад временными окнами с перекрытием; бюджет запроса ограничен.
         cursor = min(post.created_utc for post in posts.values())
+        history_start = datetime(2005, 1, 1)
         span = timedelta(seconds=1)
-        while len(posts) < limit:
-            start = cursor - span
+        while len(posts) < limit and cursor > history_start:
+            start = max(cursor - span, history_start)
             older = self.fetch_range(subreddit, start, cursor + timedelta(microseconds=1))
             posts.update((post.id, post) for post in older)
             cursor = start
             span *= 2
-            if self._requests >= self.max_requests and len(posts) < limit:
-                raise RedditRequestError("Лимита запросов не хватило для начальной выборки Reddit")
+        if len(posts) < limit and self._requests >= self.max_requests:
+            raise RedditRequestError("Лимита запросов не хватило для начальной выборки Reddit")
         return sorted(posts.values(), key=lambda post: (post.created_utc, post.id), reverse=True)[
             :limit
         ]
@@ -113,7 +147,7 @@ class RedditClient:
             )
             if len(rows) < self.PAGE_SIZE:
                 for row in rows:
-                    post = RedditPost.from_payload(row)
+                    post = _parse_post(row)
                     gathered[post.id] = post
                 continue
             midpoint = start + (end - start) / 2

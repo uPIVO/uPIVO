@@ -59,6 +59,7 @@ def sync_reddit(
     name = normalize_subreddit(subreddit)
     if (limit is not None and limit < 1) or initial_limit < 1 or overlap_seconds < 0:
         raise ValueError("Лимиты должны быть положительными, перекрытие — неотрицательным")
+    effective_initial_limit = limit if limit is not None else initial_limit
     run_started = (now or datetime.now(UTC)).astimezone(UTC).replace(tzinfo=None)
 
     # Короткая первая транзакция только считывает согласованный cursor; сеть выполняется отдельно.
@@ -76,16 +77,23 @@ def sync_reddit(
 
     with client_factory() as client:
         if expected_cursor is None and initial_floor is None:
-            posts = client.fetch_latest(name, limit=initial_limit)
+            posts = [
+                post
+                for post in client.fetch_latest(name, limit=effective_initial_limit)
+                if post.created_utc <= run_started
+            ]
             initial = True
         else:
+            if expected_cursor is None or initial_floor is None:
+                raise RedditSyncConflictError("Состояние синхронизации Reddit неполно")
             initial = False
-            overlap = timedelta(seconds=overlap_seconds)
-            lower = max(initial_floor - overlap, expected_cursor - overlap)
+            # Отдельная секундная репликация нужна даже при отключённом позднем overlap.
+            replay = timedelta(seconds=max(1, overlap_seconds))
+            lower = max(initial_floor - replay, expected_cursor - replay)
             posts = [
                 post
                 for post in client.fetch_range(name, lower, run_started)
-                if post.created_utc >= initial_floor
+                if post.created_utc >= initial_floor and post.created_utc <= run_started
             ]
 
     # Для явного инкрементального лимита считаются только новые external_id;
@@ -101,7 +109,8 @@ def sync_reddit(
         if observed_cursor != expected_cursor:
             raise RedditSyncConflictError("Курсор Reddit изменился; повторите запуск")
         if initial:
-            selected = posts[:initial_limit]
+            selected = posts[:effective_initial_limit]
+            new_floor = min((p.created_utc for p in selected), default=run_started)
             new_ids = {
                 row[0]
                 for row in session.execute(
@@ -110,6 +119,7 @@ def sync_reddit(
             }
             rows = [post for post in selected if post.id not in new_ids]
         else:
+            new_floor = initial_floor
             stored = {
                 row[0]
                 for row in session.execute(
@@ -129,11 +139,6 @@ def sync_reddit(
         if initial and saved_boundary is None:
             # Фиксируем завершённый пустой initial scan и не повторяем его каждый запуск.
             saved_boundary = run_started
-        new_floor = (
-            min((p.created_utc for p in selected), default=run_started)
-            if initial
-            else initial_floor
-        )
         if state is None:
             state = RedditSyncState(
                 source_id=source_row.id,
