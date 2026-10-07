@@ -43,3 +43,23 @@ class RedditPost:
     @property
     def body_text(self) -> str:
         return self.selftext or self.title
+
+    @property
+    def is_archived_removed(self) -> bool:
+        placeholders = {"[deleted]", "[removed]"}
+        category = self.raw_payload.get("removed_by_category")
+        has_category = bool(category) and (not isinstance(category, str) or bool(category.strip()))
+        return (
+            self.title.strip().casefold() in placeholders
+            or self.selftext.strip().casefold() in placeholders
+            or has_category
+        )
+
+
+@dataclass(frozen=True)
+class RedditFetchBatch:
+    """Подходящие публикации и максимальное время просмотренного ответа архива."""
+
+    posts: list[RedditPost]
+    scanned_through: datetime | None
+    inspected_count: int

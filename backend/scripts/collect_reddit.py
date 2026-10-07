@@ -12,7 +12,9 @@ from app.services.reddit import sync_reddit
 def main() -> int:
     parser = argparse.ArgumentParser(description="Сохранить публикации Reddit в локальную БД")
     parser.add_argument("subreddit", help="Имя subreddit или URL r/subreddit")
-    parser.add_argument("--limit", type=int, help="Максимум новых публикаций за запуск")
+    parser.add_argument(
+        "--limit", type=int, help="Максимум новых публикаций после архивной фильтрации за запуск"
+    )
     parser.add_argument(
         "--overlap-seconds",
         type=int,

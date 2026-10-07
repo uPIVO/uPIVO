@@ -13,14 +13,14 @@ from app.connectors.reddit.errors import (
     RedditSaturatedWindowError,
     RedditSyncConflictError,
 )
-from app.connectors.reddit.models import RedditPost
+from app.connectors.reddit.models import RedditFetchBatch, RedditPost
 from app.processing.reddit import map_post
 from app.services.reddit import sync_reddit
 from scripts import reddit_sync
 from scripts.collect_reddit import main as collect_reddit_main
 
 
-def payload(post_id: int | str, second: int) -> dict:
+def payload(post_id: int | str, second: int, **overrides) -> dict:
     return {
         "id": str(post_id),
         "title": f"post {post_id}",
@@ -28,6 +28,7 @@ def payload(post_id: int | str, second: int) -> dict:
         "author": "user",
         "permalink": f"/r/test/comments/{post_id}/",
         "created_utc": second,
+        **overrides,
     }
 
 
@@ -52,6 +53,22 @@ def test_mapper_uses_title_for_empty_selftext_and_naive_utc():
     assert mapped["external_id"] == "1"
     assert mapped["original_url"] == "https://www.reddit.com/r/test/comments/1/"
     assert post.created_utc == datetime.fromtimestamp(1700000000, UTC).replace(tzinfo=None)
+
+
+@pytest.mark.parametrize(
+    ("fields", "excluded"),
+    [
+        ({"title": " [DeLeTeD] "}, True),
+        ({"selftext": " [REMOVED]\n"}, True),
+        ({"removed_by_category": "automod_filtered"}, True),
+        ({"selftext": "", "url": "https://example.com/article"}, False),
+        ({"author": "[deleted]"}, False),
+        ({"removed_by_category": "  "}, False),
+    ],
+)
+def test_archival_removal_predicate_uses_only_explicit_post_evidence(fields, excluded):
+    post = RedditPost.from_payload(payload(1, 1700000000, **fields))
+    assert post.is_archived_removed is excluded
 
 
 def test_fetch_range_covers_all_rows_and_deduplicates_inclusive_split_boundary():
@@ -104,10 +121,10 @@ def test_fetch_latest_supports_limit_over_one_hundred_and_collects_cutoff_ties()
         return response(sorted(matched, key=lambda row: row["created_utc"])[:100])
 
     client = make_client(handler)
-    posts = client.fetch_latest("test", 150)
-    assert len(posts) == 150
-    assert len({post.id for post in posts}) == 150
-    assert {f"tie-{i}" for i in range(20)} <= {post.id for post in posts}
+    batch = client.fetch_latest("test", 150)
+    assert len(batch.posts) == 150
+    assert len({post.id for post in batch.posts}) == 150
+    assert {f"tie-{i}" for i in range(20)} <= {post.id for post in batch.posts}
     assert len(requests) >= 2
     close_client(client)
 
@@ -126,8 +143,8 @@ def test_fetch_latest_returns_available_history_without_spinning_past_2005():
         return response(sorted(matched, key=lambda row: row["created_utc"])[:100])
 
     client = make_client(handler)
-    posts = client.fetch_latest("test", 250)
-    assert len(posts) == 100
+    batch = client.fetch_latest("test", 250)
+    assert len(batch.posts) == 100
     close_client(client)
 
 
@@ -141,8 +158,46 @@ def test_saturated_one_second_window_fails_closed():
 def test_fetch_latest_defaults_to_fifty_and_accepts_documented_data_envelope():
     rows = [payload(i, 1704067200 + i) for i in range(50)]
     client = make_client(lambda _: response(rows))
-    posts = client.fetch_latest("test")
-    assert len(posts) == 50
+    batch = client.fetch_latest("test")
+    assert len(batch.posts) == 50
+    close_client(client)
+
+
+def test_fetch_latest_refills_removed_rows_and_keeps_inspected_high_water():
+    hidden = [payload(i, 1704067300 + i, removed_by_category="moderator") for i in range(98)]
+    page = hidden + [payload("keep-1", 1704067299), payload("keep-2", 1704067298)]
+    older = [payload(f"old-{i}", 1704067297) for i in range(3)]
+
+    def handler(request):
+        params = dict(request.url.params)
+        if "after" not in params:
+            return response(page)
+        after = datetime.fromisoformat(params["after"]).timestamp()
+        before = datetime.fromisoformat(params["before"]).timestamp()
+        return response([row for row in older if after <= row["created_utc"] <= before])
+
+    client = make_client(handler)
+    batch = client.fetch_latest("test", 5)
+    assert {post.id for post in batch.posts} == {"keep-1", "keep-2", "old-0", "old-1", "old-2"}
+    assert batch.scanned_through == datetime.fromtimestamp(1704067397, UTC).replace(tzinfo=None)
+    assert batch.inspected_count == 103
+    close_client(client)
+
+
+def test_fetch_latest_as_of_excludes_future_rows_and_high_water():
+    as_of = datetime(2024, 1, 1, 0, 0, 1)
+    rows = [payload("future", 1893456000), payload("valid", 1704067200)]
+    requests = []
+
+    def handler(request):
+        requests.append(dict(request.url.params))
+        return response(rows)
+
+    client = make_client(handler)
+    batch = client.fetch_latest("test", 1, as_of=as_of)
+    assert [post.id for post in batch.posts] == ["valid"]
+    assert batch.scanned_through == datetime(2024, 1, 1)
+    assert requests[0]["before"] == as_of.replace(tzinfo=UTC).isoformat()
     close_client(client)
 
 
@@ -308,8 +363,11 @@ class FakeSessionFactory:
 
 
 class FakeSyncClient:
-    def __init__(self, posts):
+    def __init__(self, posts, scanned_through=None):
         self.posts = posts
+        self.scanned_through = scanned_through or max(
+            (post.created_utc for post in posts), default=None
+        )
         self.initial_limit = None
         self.range_bounds = []
 
@@ -319,35 +377,49 @@ class FakeSyncClient:
     def __exit__(self, *_):
         return False
 
-    def fetch_latest(self, subreddit, limit):
+    def fetch_latest(self, subreddit, limit, *, as_of=None):
         self.initial_limit = limit
-        return self.posts
+        return RedditFetchBatch(self.posts, self.scanned_through, len(self.posts))
 
     def fetch_range(self, subreddit, after, before):
         self.range_bounds.append((after, before))
         return self.posts
 
 
-def test_preview_default_output_remains_compact(monkeypatch, capsys):
-    post = SimpleNamespace(
-        created_utc=datetime(2024, 1, 1),
+class FakePreviewClient:
+    def __init__(self, posts):
+        self.posts = posts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def fetch_latest(self, subreddit, limit):
+        return RedditFetchBatch(
+            self.posts,
+            max((post.created_utc for post in self.posts), default=None),
+            len(self.posts),
+        )
+
+
+def preview_post(post_id=1, *, selftext="полный текст", **fields):
+    data = payload(
+        post_id,
+        1704067200,
         title="Заголовок",
-        permalink="https://www.reddit.com/r/test/comments/1/",
-        selftext="полный текст",
+        selftext=selftext,
+        permalink=f"/r/test/comments/{post_id}/",
     )
+    data.update(fields)
+    return RedditPost.from_payload(data)
 
-    class FakeClient:
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *_):
-            return False
-
-        def fetch_latest(self, subreddit, limit):
-            return [post]
-
+def test_preview_default_output_remains_compact(monkeypatch, capsys):
+    post = preview_post()
     monkeypatch.setattr(sys, "argv", ["reddit_sync", "python"])
-    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    monkeypatch.setattr(reddit_sync, "RedditClient", lambda: FakePreviewClient([post]))
     assert reddit_sync.main() == 0
     assert capsys.readouterr().out == (
         "[2024-01-01T00:00:00] Заголовок\nhttps://www.reddit.com/r/test/comments/1/\n\n"
@@ -356,25 +428,9 @@ def test_preview_default_output_remains_compact(monkeypatch, capsys):
 
 def test_preview_full_prints_complete_multiline_selftext(monkeypatch, capsys):
     text = "первая строка\n" + "а" * 400 + "\nпоследняя строка"
-    post = SimpleNamespace(
-        created_utc=datetime(2024, 1, 1),
-        title="Заголовок",
-        permalink="https://www.reddit.com/r/test/comments/1/",
-        selftext=text,
-    )
-
-    class FakeClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def fetch_latest(self, subreddit, limit):
-            return [post]
-
+    post = preview_post(selftext=text)
     monkeypatch.setattr(sys, "argv", ["reddit_sync", "python", "--full"])
-    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    monkeypatch.setattr(reddit_sync, "RedditClient", lambda: FakePreviewClient([post]))
     assert reddit_sync.main() == 0
     assert capsys.readouterr().out == (
         "[2024-01-01T00:00:00] Заголовок\n"
@@ -382,35 +438,31 @@ def test_preview_full_prints_complete_multiline_selftext(monkeypatch, capsys):
     )
 
 
+@pytest.mark.parametrize("full", [False, True])
+def test_preview_omits_archive_removed_posts(monkeypatch, capsys, full):
+    posts = [
+        preview_post(1, title="[deleted]"),
+        preview_post(2, selftext="[removed]"),
+        preview_post(3, removed_by_category="automod_filtered"),
+    ]
+    argv = ["reddit_sync", "python"] + (["--full"] if full else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(reddit_sync, "RedditClient", lambda: FakePreviewClient(posts))
+    assert reddit_sync.main() == 0
+    assert capsys.readouterr().out == ""
+
+
 @pytest.mark.parametrize(
     ("selftext", "notice"),
     [
         ("", "Текст поста отсутствует в ответе Arctic Shift."),
         ("  \n ", "Текст поста отсутствует в ответе Arctic Shift."),
-        ("[deleted]", "Вместо текста в архивном ответе: [deleted]."),
-        (" [removed] \n", "Вместо текста в архивном ответе: [removed]."),
     ],
 )
-def test_preview_full_reports_empty_and_archive_placeholders(monkeypatch, capsys, selftext, notice):
-    post = SimpleNamespace(
-        created_utc=datetime(2024, 1, 1),
-        title="Заголовок",
-        permalink="https://www.reddit.com/r/test/comments/1/",
-        selftext=selftext,
-    )
-
-    class FakeClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def fetch_latest(self, subreddit, limit):
-            return [post]
-
+def test_preview_full_reports_empty_content(monkeypatch, capsys, selftext, notice):
+    post = preview_post(selftext=selftext)
     monkeypatch.setattr(sys, "argv", ["reddit_sync", "python", "--full"])
-    monkeypatch.setattr(reddit_sync, "RedditClient", FakeClient)
+    monkeypatch.setattr(reddit_sync, "RedditClient", lambda: FakePreviewClient([post]))
     assert reddit_sync.main() == 0
     assert capsys.readouterr().out == (
         f"[2024-01-01T00:00:00] Заголовок\nhttps://www.reddit.com/r/test/comments/1/\n{notice}\n\n"
@@ -455,7 +507,49 @@ def test_first_run_limit_overrides_initial_limit_and_discards_future_posts():
     )
     assert client.initial_limit == 7
     assert result.saved == 1
+    assert write.added[0].cursor_at <= datetime(2024, 1, 1)
     assert [row["external_id"] for batch in write.insert_values for row in batch] == ["1"]
+
+
+def test_initial_cursor_uses_inspected_high_water_but_floor_uses_oldest_eligible():
+    eligible = RedditPost.from_payload(payload(1, 1704067200))
+    latest_hidden = datetime(2024, 1, 1, 0, 1)
+    client = FakeSyncClient([eligible], scanned_through=latest_hidden)
+    read = FakeSession([None])
+    write = FakeSession([1, None], execute_results=[[]])
+    sync_reddit(
+        FakeSessionFactory([read, write]),
+        "test",
+        client_factory=lambda: client,
+        now=datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    assert write.added[0].cursor_at == latest_hidden
+    assert write.added[0].initial_floor_at == eligible.created_utc
+
+
+def test_incremental_all_filtered_posts_advance_cursor_without_saving():
+    cursor = datetime(2024, 1, 1)
+    latest_hidden = datetime(2024, 1, 1, 0, 0, 20)
+    state = SimpleNamespace(cursor_at=cursor, initial_floor_at=cursor, overlap_seconds=0)
+    source = SimpleNamespace(id=1)
+    hidden = [
+        RedditPost.from_payload(payload("removed", 1704067210, selftext="[REMOVED]")),
+        RedditPost.from_payload(payload("moderated", 1704067220, removed_by_category="reddit")),
+    ]
+    read, write = (
+        FakeSession([source, state]),
+        FakeSession([1, state], execute_results=[[]]),
+    )
+    result = sync_reddit(
+        FakeSessionFactory([read, write]),
+        "test",
+        limit=1,
+        client_factory=lambda: FakeSyncClient(hidden),
+        now=datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    assert result.fetched == result.saved == 0
+    assert state.cursor_at == latest_hidden
+    assert write.insert_values == []
 
 
 def test_incremental_limit_resumes_equal_time_ids_with_boundary_replay():
@@ -470,6 +564,9 @@ def test_incremental_limit_resumes_equal_time_ids_with_boundary_replay():
     client1 = FakeSyncClient(
         [
             RedditPost.from_payload(payload("a", int(tied.replace(tzinfo=UTC).timestamp()))),
+            RedditPost.from_payload(
+                payload("removed", int(tied.replace(tzinfo=UTC).timestamp()), selftext="[removed]")
+            ),
             RedditPost.from_payload(payload("b", int(tied.replace(tzinfo=UTC).timestamp()))),
             RedditPost.from_payload(payload("c", int(tied.replace(tzinfo=UTC).timestamp()) + 1)),
         ]
@@ -493,6 +590,9 @@ def test_incremental_limit_resumes_equal_time_ids_with_boundary_replay():
     client2 = FakeSyncClient(
         [
             RedditPost.from_payload(payload("a", int(tied.replace(tzinfo=UTC).timestamp()))),
+            RedditPost.from_payload(
+                payload("removed", int(tied.replace(tzinfo=UTC).timestamp()), selftext="[removed]")
+            ),
             RedditPost.from_payload(payload("b", int(tied.replace(tzinfo=UTC).timestamp()))),
             RedditPost.from_payload(payload("c", int(tied.replace(tzinfo=UTC).timestamp()) + 1)),
         ]
@@ -531,7 +631,7 @@ def test_late_row_does_not_move_cursor_backward():
 
 def test_api_failure_happens_before_any_write_transaction():
     class BrokenClient(FakeSyncClient):
-        def fetch_latest(self, subreddit, limit):
+        def fetch_latest(self, subreddit, limit, *, as_of=None):
             raise RedditRequestError("сбой API")
 
     read = FakeSession([None])

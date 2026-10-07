@@ -1,13 +1,14 @@
 import json
 import re
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 
 from app.connectors.reddit.errors import RedditRequestError, RedditSaturatedWindowError
-from app.connectors.reddit.models import RedditPost
+from app.connectors.reddit.models import RedditFetchBatch, RedditPost
 
 
 def _parse_post(row: dict[str, Any]) -> RedditPost:
@@ -175,31 +176,59 @@ class RedditClient:
             raise RedditRequestError("Arctic Shift вернул публикацию неожиданного формата")
         return rows
 
-    def fetch_latest(self, subreddit: str, limit: int = 50) -> list[RedditPost]:
+    def fetch_latest(
+        self, subreddit: str, limit: int = 50, *, as_of: datetime | None = None
+    ) -> RedditFetchBatch:
         if limit < 1:
             raise ValueError("Лимит должен быть положительным")
-        batch = self._search(subreddit, sort="desc", limit=min(self.PAGE_SIZE, limit))
-        posts = {post.id: post for post in map(_parse_post, batch)}
-        if len(batch) < self.PAGE_SIZE or len(posts) >= limit:
-            return sorted(
-                posts.values(), key=lambda post: (post.created_utc, post.id), reverse=True
-            )[:limit]
 
-        # Без offset продолжаем назад временными окнами с перекрытием; бюджет запроса ограничен.
-        cursor = min(post.created_utc for post in posts.values())
+        eligible: dict[str, RedditPost] = {}
+        scanned_ids: set[str] = set()
+        scanned_through: datetime | None = None
+        pagination_cursor: datetime | None = None
+        inspected_count = 0
+
+        def inspect(rows: Sequence[dict[str, Any] | RedditPost]) -> None:
+            nonlocal scanned_through, pagination_cursor, inspected_count
+            for row in rows:
+                post = row if isinstance(row, RedditPost) else _parse_post(row)
+                if post.id in scanned_ids:
+                    continue
+                scanned_ids.add(post.id)
+                inspected_count += 1
+                if pagination_cursor is None or post.created_utc < pagination_cursor:
+                    pagination_cursor = post.created_utc
+                if as_of is not None and post.created_utc > as_of:
+                    continue
+                if scanned_through is None or post.created_utc > scanned_through:
+                    scanned_through = post.created_utc
+                if not post.is_archived_removed:
+                    eligible[post.id] = post
+
+        first_page = self._search(subreddit, sort="desc", limit=self.PAGE_SIZE, before=as_of)
+        inspect(first_page)
         history_start = datetime(2005, 1, 1)
         span = timedelta(seconds=1)
-        while len(posts) < limit and cursor > history_start:
-            start = max(cursor - span, history_start)
-            older = self.fetch_range(subreddit, start, cursor + timedelta(microseconds=1))
-            posts.update((post.id, post) for post in older)
-            cursor = start
+        while (
+            len(eligible) < limit
+            and len(first_page) == self.PAGE_SIZE
+            and pagination_cursor is not None
+            and pagination_cursor > history_start
+        ):
+            start = max(pagination_cursor - span, history_start)
+            older = self.fetch_range(
+                subreddit, start, pagination_cursor + timedelta(microseconds=1)
+            )
+            inspect(older)
+            pagination_cursor = start
             span *= 2
-        if len(posts) < limit and self._requests >= self.max_requests:
-            raise RedditRequestError("Лимита запросов не хватило для начальной выборки Reddit")
-        return sorted(posts.values(), key=lambda post: (post.created_utc, post.id), reverse=True)[
-            :limit
-        ]
+        if len(eligible) < limit and pagination_cursor and pagination_cursor > history_start:
+            if self._requests >= self.max_requests:
+                raise RedditRequestError("Лимита запросов не хватило для начальной выборки Reddit")
+        selected = sorted(
+            eligible.values(), key=lambda post: (post.created_utc, post.id), reverse=True
+        )[:limit]
+        return RedditFetchBatch(selected, scanned_through, inspected_count)
 
     def fetch_range(self, subreddit: str, after: datetime, before: datetime) -> list[RedditPost]:
         """Получить весь диапазон; насыщенные интервалы делятся до секундной точности."""
