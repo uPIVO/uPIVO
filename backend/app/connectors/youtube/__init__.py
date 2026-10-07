@@ -36,6 +36,6 @@ def collect_channel(
 ) -> tuple[FetchResult, PersistStats]:
     """Fetch a channel RSS feed and upsert raw feed_items. Caller commits."""
     client = connector or YouTubeConnector()
-    fetch = client.fetch(url, limit=limit)
+    fetch = client.fetch(url, limit=limit, session=session)
     stats = persist_fetch(session, fetch)
     return fetch, stats

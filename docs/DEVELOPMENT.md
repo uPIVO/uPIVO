@@ -76,6 +76,7 @@ uv run python -m app.connectors.youtube "https://www.youtube.com/@GoogleDevelope
 пишутся в `sources` + `feed_items` (название, ссылка, дата, описание).
 Если у ролика есть субтитры — их текст кладётся в `body_text` и в `raw_payload.transcript`;
 если субтитров нет, сохраняется описание, ролик всё равно пишется.
-Повторный запуск обновляет те же `external_id`. Пустой канал — source и 0 записей.
+Повторный запуск обновляет те же `external_id`. Субтитры с YouTube не качаются снова,
+если текст уже лежит в `raw_payload.transcript`. Пустой канал — source и 0 записей.
 Неверный URL завершает процесс с кодом 2; сеть/HTTP — с кодом 1.
 Не принимаются search, playlist, watch и OAuth.
