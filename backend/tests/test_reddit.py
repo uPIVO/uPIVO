@@ -1,6 +1,6 @@
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -71,34 +71,55 @@ def test_archival_removal_predicate_uses_only_explicit_post_evidence(fields, exc
     assert post.is_archived_removed is excluded
 
 
-def test_fetch_range_covers_all_rows_and_deduplicates_inclusive_split_boundary():
+@pytest.mark.parametrize("inclusive", [True, False])
+def test_fetch_range_covers_split_boundaries_with_either_api_inclusivity(inclusive):
+    start = datetime(2024, 1, 1)
     midpoint = datetime(2024, 1, 1, 12)
-    rows = [payload(i, 1704067200 + i) for i in range(99)] + [
-        payload(99, int(midpoint.replace(tzinfo=UTC).timestamp()))
-    ]
+    rows = [payload("at-start", int(start.replace(tzinfo=UTC).timestamp()))]
+    rows += [payload(i, 1704067200 + i + 1) for i in range(100)]
+    rows.append(payload("at-midpoint", int(midpoint.replace(tzinfo=UTC).timestamp())))
     requests = []
 
     def handler(request):
         params = dict(request.url.params)
         requests.append(params)
-        if "after" not in params:
-            return response(rows)
         after = datetime.fromisoformat(params["after"]).replace(tzinfo=None)
         before = datetime.fromisoformat(params["before"]).replace(tzinfo=None)
-        matched = [
-            row
-            for row in rows
-            if after
-            <= datetime.fromtimestamp(row["created_utc"], UTC).replace(tzinfo=None)
-            <= before
-        ]
+
+        def matches(row):
+            created = datetime.fromtimestamp(row["created_utc"], UTC).replace(tzinfo=None)
+            return after <= created <= before if inclusive else after < created < before
+
+        matched = [row for row in rows if matches(row)]
         return response(sorted(matched, key=lambda row: row["created_utc"])[:100])
 
     client = make_client(handler)
-    result = client.fetch_range("test", datetime(2024, 1, 1), datetime(2024, 1, 2))
-    assert len(result) == 100
-    assert {post.id for post in result} == {str(i) for i in range(100)}
-    assert len(requests) > 2
+    result = client.fetch_range("test", start, datetime(2024, 1, 2))
+    ids = {post.id for post in result}
+    assert {str(i) for i in range(100)} | {"at-midpoint"} <= ids
+    assert ("at-start" in ids) is inclusive
+    assert 2 < len(requests) < client.max_requests
+    close_client(client)
+
+
+def test_search_serializes_dates_as_outward_rounded_utc_milliseconds():
+    offset = timezone(timedelta(hours=5))
+    after = datetime(2024, 1, 1, 5, 0, 0, 123456, tzinfo=offset)
+    before = datetime(2024, 1, 1, 5, 0, 0, 999999, tzinfo=offset)
+    requests = []
+    client = make_client(
+        lambda request: (requests.append(dict(request.url.params)), response([]))[1]
+    )
+    client.fetch_range("test", after, before)
+    assert requests == [
+        {
+            "subreddit": "test",
+            "sort": "asc",
+            "limit": "100",
+            "after": "2024-01-01T00:00:00.123Z",
+            "before": "2024-01-01T00:00:01.000Z",
+        }
+    ]
     close_client(client)
 
 
@@ -185,7 +206,7 @@ def test_fetch_latest_refills_removed_rows_and_keeps_inspected_high_water():
 
 
 def test_fetch_latest_as_of_excludes_future_rows_and_high_water():
-    as_of = datetime(2024, 1, 1, 0, 0, 1)
+    as_of = datetime(2024, 1, 1)
     rows = [payload("future", 1893456000), payload("valid", 1704067200)]
     requests = []
 
@@ -197,7 +218,7 @@ def test_fetch_latest_as_of_excludes_future_rows_and_high_water():
     batch = client.fetch_latest("test", 1, as_of=as_of)
     assert [post.id for post in batch.posts] == ["valid"]
     assert batch.scanned_through == datetime(2024, 1, 1)
-    assert requests[0]["before"] == as_of.replace(tzinfo=UTC).isoformat()
+    assert requests[0]["before"] == "2024-01-01T00:00:00.000Z"
     close_client(client)
 
 

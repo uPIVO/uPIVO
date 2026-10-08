@@ -60,6 +60,19 @@ def _error_detail(body: bytes) -> str:
     return " ".join(text.split())[:300]
 
 
+def _format_api_date(value: datetime, *, upper_bound: bool) -> str:
+    """Сериализовать UTC-границу с консервативным округлением до миллисекунды."""
+    utc = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    milliseconds, remainder = divmod(utc.microsecond, 1000)
+    if upper_bound and remainder:
+        milliseconds += 1
+        if milliseconds == 1000:
+            utc = utc.replace(microsecond=0) + timedelta(seconds=1)
+            milliseconds = 0
+    rounded = utc.replace(microsecond=milliseconds * 1000)
+    return rounded.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 class RedditClient:
     URL = "https://arctic-shift.photon-reddit.com/api/posts/search"
     PAGE_SIZE = 100
@@ -136,9 +149,9 @@ class RedditClient:
             raise RedditRequestError("Превышен лимит запросов Arctic Shift за запуск")
         params: dict[str, str | int] = {"subreddit": subreddit, "sort": sort, "limit": limit}
         if after is not None:
-            params["after"] = after.replace(tzinfo=UTC).isoformat()
+            params["after"] = _format_api_date(after, upper_bound=False)
         if before is not None:
-            params["before"] = before.replace(tzinfo=UTC).isoformat()
+            params["before"] = _format_api_date(before, upper_bound=True)
         self._requests += 1
         try:
             with self.http_client.stream(
