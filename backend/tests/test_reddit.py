@@ -90,6 +90,35 @@ def test_mapper_uses_title_for_empty_selftext_and_naive_utc():
         ({"title": " [DeLeTeD] "}, True),
         ({"selftext": " [REMOVED]\n"}, True),
         ({"removed_by_category": "automod_filtered"}, True),
+        (
+            {
+                "removed_by_category": None,
+                "selftext": "The full original text is still present",
+                "_meta": {
+                    "was_deleted_later": True,
+                    "removal_type": "moderator",
+                    "edited_title": "[ Removed by moderator ]",
+                },
+            },
+            True,
+        ),
+        ({}, False),
+        ({"_meta": {"was_deleted_later": False}}, False),
+        ({"_meta": {"was_deleted_later": "true"}}, False),
+        ({"_meta": {"was_deleted_later": 1}}, False),
+        ({"_meta": None}, False),
+        ({"_meta": "malformed"}, False),
+        (
+            {
+                "removed_by_category": None,
+                "_meta": {
+                    "was_deleted_later": False,
+                    "removal_type": "moderator",
+                    "edited_title": "[ Removed by moderator ]",
+                },
+            },
+            False,
+        ),
         ({"selftext": "", "url": "https://example.com/article"}, False),
         ({"author": "[deleted]"}, False),
         ({"removed_by_category": "  "}, False),
@@ -214,7 +243,16 @@ def test_fetch_latest_defaults_to_fifty_and_accepts_documented_data_envelope():
 
 
 def test_fetch_latest_refills_removed_rows_and_keeps_inspected_high_water():
-    hidden = [payload(i, 1704067300 + i, removed_by_category="moderator") for i in range(98)]
+    hidden = [payload(i, 1704067300 + i, removed_by_category="moderator") for i in range(97)]
+    hidden.append(
+        payload(
+            "deleted-later",
+            1704067397,
+            removed_by_category=None,
+            selftext="Full original text",
+            _meta={"was_deleted_later": True},
+        )
+    )
     page = hidden + [payload("keep-1", 1704067299), payload("keep-2", 1704067298)]
     older = [payload(f"old-{i}", 1704067297) for i in range(3)]
 
@@ -625,6 +663,11 @@ def test_preview_omits_archive_removed_posts(monkeypatch, capsys, full):
         preview_post(1, title="[deleted]"),
         preview_post(2, selftext="[removed]"),
         preview_post(3, removed_by_category="automod_filtered"),
+        preview_post(
+            4,
+            removed_by_category=None,
+            _meta={"was_deleted_later": True},
+        ),
     ]
     argv = ["reddit_sync", "python"] + (["--full"] if full else [])
     monkeypatch.setattr(sys, "argv", argv)
@@ -715,7 +758,15 @@ def test_incremental_all_filtered_posts_advance_cursor_without_saving():
     source = SimpleNamespace(id=1)
     hidden = [
         RedditPost.from_payload(payload("removed", 1704067210, selftext="[REMOVED]")),
-        RedditPost.from_payload(payload("moderated", 1704067220, removed_by_category="reddit")),
+        RedditPost.from_payload(
+            payload(
+                "deleted-later",
+                1704067220,
+                removed_by_category=None,
+                selftext="Full original text",
+                _meta={"was_deleted_later": True},
+            )
+        ),
     ]
     read, write = (
         FakeSession([source, state]),
