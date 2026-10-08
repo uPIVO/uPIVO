@@ -1,6 +1,7 @@
 import sys
 import time
 from datetime import UTC, datetime, timedelta, timezone
+from email.utils import format_datetime
 from types import SimpleNamespace
 
 import httpx
@@ -44,6 +45,34 @@ def response(rows):
 def close_client(client):
     client.close()
     client.http_client.close()
+
+
+class FakeClock:
+    def __init__(self):
+        self.elapsed = 0.0
+        self.wall_now = datetime(2024, 1, 1, tzinfo=UTC)
+        self.sleeps = []
+
+    def monotonic(self):
+        return 100.0 + self.elapsed
+
+    def wall_clock(self):
+        return self.wall_now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.elapsed += seconds
+        self.wall_now += timedelta(seconds=seconds)
+
+
+def make_clock_client(handler, clock, **kwargs):
+    return make_client(
+        handler,
+        sleep_func=clock.sleep,
+        monotonic_func=clock.monotonic,
+        wall_clock_func=clock.wall_clock,
+        **kwargs,
+    )
 
 
 def test_mapper_uses_title_for_empty_selftext_and_naive_utc():
@@ -255,6 +284,137 @@ def test_deadline_is_checked_after_stream_read():
     client = make_client(handler, deadline_seconds=0.005)
     with pytest.raises(RedditRequestError, match="срок"):
         client.fetch_latest("test", 5)
+    close_client(client)
+
+
+def test_http_422_timeout_retries_twice_then_succeeds_without_real_sleep():
+    clock = FakeClock()
+    attempts = 0
+
+    def handler(_):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(422, json={"detail": "Timeout. Maybe slow down a bit"})
+        return response([])
+
+    client = make_clock_client(handler, clock)
+    batch = client.fetch_latest("test", 5)
+    assert batch.posts == []
+    assert attempts == client._requests == client._responses == 3
+    assert clock.sleeps == [2, 4]
+    close_client(client)
+
+
+def test_http_422_timeout_exhaustion_keeps_error_and_attempt_count():
+    clock = FakeClock()
+    client = make_clock_client(
+        lambda _: httpx.Response(422, json={"detail": "Timeout. Maybe slow down a bit"}),
+        clock,
+    )
+    with pytest.raises(RedditRequestError) as raised:
+        client.fetch_latest("test", 5)
+    assert "HTTP 422" in str(raised.value)
+    assert "Timeout. Maybe slow down a bit" in str(raised.value)
+    assert "попыток: 3" in str(raised.value)
+    assert client._requests == client._responses == 3
+    assert clock.sleeps == [2, 4]
+    close_client(client)
+
+
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [
+        (422, "invalid subreddit"),
+        (422, "Request timed out while validating subreddit"),
+        (403, "Timeout. Maybe slow down a bit"),
+    ],
+)
+def test_only_matching_422_timeout_and_429_are_retried(status, detail):
+    clock = FakeClock()
+    calls = 0
+
+    def handler(_):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, json={"detail": detail})
+
+    client = make_clock_client(handler, clock)
+    with pytest.raises(RedditRequestError):
+        client.fetch_latest("test", 5)
+    assert calls == client._requests == client._responses == 1
+    assert clock.sleeps == []
+    close_client(client)
+
+
+@pytest.mark.parametrize("retry_after_kind", ["seconds", "date"])
+def test_http_429_respects_bounded_retry_after(retry_after_kind):
+    clock = FakeClock()
+    if retry_after_kind == "seconds":
+        retry_after = "3"
+    else:
+        retry_after = format_datetime(clock.wall_now + timedelta(seconds=3), usegmt=True)
+    attempts = 0
+
+    def handler(_):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after})
+        return response([])
+
+    client = make_clock_client(handler, clock)
+    client.fetch_latest("test", 5)
+    assert attempts == client._requests == 2
+    assert clock.sleeps == [3]
+    close_client(client)
+
+
+def test_retry_does_not_sleep_past_operation_deadline_or_request_budget():
+    clock = FakeClock()
+    client = make_clock_client(
+        lambda _: httpx.Response(422, json={"detail": "Timeout. Maybe slow down a bit"}),
+        clock,
+        deadline_seconds=1,
+    )
+    with pytest.raises(RedditRequestError, match="срок") as raised:
+        client.fetch_latest("test", 5)
+    assert "HTTP 422" in str(raised.value)
+    assert client._requests == client._responses == 1
+    assert clock.sleeps == []
+    close_client(client)
+
+    clock = FakeClock()
+    client = make_clock_client(
+        lambda _: httpx.Response(429, headers={"Retry-After": "2"}),
+        clock,
+        max_requests=1,
+    )
+    with pytest.raises(RedditRequestError, match="HTTP 429"):
+        client.fetch_latest("test", 5)
+    assert client._requests == client._responses == 1
+    assert clock.sleeps == []
+    close_client(client)
+
+
+def test_retry_exhaustion_does_not_open_write_transaction():
+    clock = FakeClock()
+    client = make_clock_client(
+        lambda _: httpx.Response(422, json={"detail": "Timeout. Maybe slow down a bit"}),
+        clock,
+    )
+    read = FakeSession([None])
+    factory = FakeSessionFactory([read])
+    with pytest.raises(RedditRequestError):
+        sync_reddit(
+            factory,
+            "test",
+            client_factory=lambda: client,
+            now=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+    assert factory.created == [read]
+    assert client._requests == 3
+    assert clock.sleeps == [2, 4]
     close_client(client)
 
 

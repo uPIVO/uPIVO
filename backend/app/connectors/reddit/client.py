@@ -1,8 +1,9 @@
 import json
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -73,9 +74,38 @@ def _format_api_date(value: datetime, *, upper_bound: bool) -> str:
     return rounded.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _is_retryable_timeout(detail: str) -> bool:
+    normalized = " ".join(detail.casefold().split())
+    return normalized in {
+        "timeout",
+        "timeout. maybe slow down a bit",
+        "timeout. maybe slow down a bit.",
+    }
+
+
+def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        if value.isdecimal():
+            return float(int(value))
+        retry_at = parsedate_to_datetime(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    else:
+        now = now.astimezone(UTC)
+    return max(0.0, (retry_at.astimezone(UTC) - now).total_seconds())
+
+
 class RedditClient:
     URL = "https://arctic-shift.photon-reddit.com/api/posts/search"
     PAGE_SIZE = 100
+    MAX_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -86,6 +116,9 @@ class RedditClient:
         max_responses: int = 120,
         max_response_bytes: int = 5 * 1024 * 1024,
         http_client: httpx.Client | None = None,
+        sleep_func: Callable[[float], None] = time.sleep,
+        monotonic_func: Callable[[], float] = time.monotonic,
+        wall_clock_func: Callable[[], datetime] | None = None,
     ) -> None:
         self.timeout = timeout
         self.deadline_seconds = deadline_seconds
@@ -94,7 +127,10 @@ class RedditClient:
         self.max_response_bytes = max_response_bytes
         self.http_client = http_client or httpx.Client(timeout=timeout)
         self._owns_client = http_client is None
-        self._started = 0.0
+        self._sleep = sleep_func
+        self._monotonic = monotonic_func
+        self._wall_clock = wall_clock_func or (lambda: datetime.now(UTC))
+        self._started: float | None = None
         self._requests = 0
         self._responses = 0
 
@@ -103,12 +139,18 @@ class RedditClient:
             self.http_client.close()
 
     def __enter__(self) -> "RedditClient":
-        self._started = time.monotonic()
+        self._started = self._monotonic()
         self._requests = self._responses = 0
         return self
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+    def _remaining(self) -> float:
+        now = self._monotonic()
+        if self._started is None:
+            self._started = now
+        return self.deadline_seconds - (now - self._started)
 
     def _read_bounded_body(self, response: httpx.Response) -> tuple[bytes | None, str | None]:
         content_length = response.headers.get("content-length")
@@ -121,13 +163,13 @@ class RedditClient:
         chunks: list[bytes] = []
         size = 0
         for chunk in response.iter_bytes():
-            if time.monotonic() - self._started >= self.deadline_seconds:
+            if self._remaining() <= 0:
                 return None, "истёк срок чтения ответа"
             size += len(chunk)
             if size > self.max_response_bytes:
                 return None, "размер тела ответа превышает установленный предел"
             chunks.append(chunk)
-        if time.monotonic() - self._started >= self.deadline_seconds:
+        if self._remaining() <= 0:
             return None, "истёк срок чтения ответа"
         return b"".join(chunks), None
 
@@ -140,48 +182,89 @@ class RedditClient:
         after: datetime | None = None,
         before: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        if self._started == 0:
-            self._started = time.monotonic()
-        remaining = self.deadline_seconds - (time.monotonic() - self._started)
-        if remaining <= 0:
-            raise RedditRequestError("Превышен срок получения данных Reddit")
-        if self._requests >= self.max_requests or self._responses >= self.max_responses:
-            raise RedditRequestError("Превышен лимит запросов Arctic Shift за запуск")
-        params: dict[str, str | int] = {"subreddit": subreddit, "sort": sort, "limit": limit}
-        if after is not None:
-            params["after"] = _format_api_date(after, upper_bound=False)
-        if before is not None:
-            params["before"] = _format_api_date(before, upper_bound=True)
-        self._requests += 1
-        try:
-            with self.http_client.stream(
-                "GET", self.URL, params=params, timeout=min(self.timeout, remaining)
-            ) as response:
-                self._responses += 1
-                status = response.status_code
-                if not response.is_success:
-                    try:
+        attempt = 0
+        while True:
+            remaining = self._remaining()
+            if remaining <= 0:
+                raise RedditRequestError("Превышен срок получения данных Reddit")
+            if self._requests >= self.max_requests or self._responses >= self.max_responses:
+                raise RedditRequestError("Превышен лимит запросов Arctic Shift за запуск")
+            params: dict[str, str | int] = {"subreddit": subreddit, "sort": sort, "limit": limit}
+            if after is not None:
+                params["after"] = _format_api_date(after, upper_bound=False)
+            if before is not None:
+                params["before"] = _format_api_date(before, upper_bound=True)
+            self._requests += 1
+            attempt += 1
+            retry_delay: float | None = None
+            try:
+                with self.http_client.stream(
+                    "GET", self.URL, params=params, timeout=min(self.timeout, remaining)
+                ) as response:
+                    self._responses += 1
+                    status = response.status_code
+                    if not response.is_success:
+                        try:
+                            body, read_error = self._read_bounded_body(response)
+                        except (httpx.HTTPError, ValueError):
+                            body, read_error = None, "тело ошибки не удалось прочитать"
+                        detail = _error_detail(body) if body else ""
+                        context = detail or read_error
+                        suffix = f": {context}" if context else ""
+                        message = f"Arctic Shift вернул HTTP {status}{suffix}"
+                        retryable = status == 429 or (
+                            status == 422 and _is_retryable_timeout(detail)
+                        )
+                        if not retryable:
+                            raise RedditRequestError(message)
+                        if attempt >= self.MAX_ATTEMPTS:
+                            raise RedditRequestError(f"{message} (попыток: {attempt})")
+                        if (
+                            self._requests >= self.max_requests
+                            or self._responses >= self.max_responses
+                        ):
+                            raise RedditRequestError(
+                                f"{message}; повтор отменён: исчерпан общий лимит запросов "
+                                f"(попыток: {attempt})"
+                            )
+                        retry_after = response.headers.get("retry-after") if status == 429 else None
+                        retry_delay = (
+                            _retry_after_seconds(retry_after, self._wall_clock())
+                            if retry_after
+                            else None
+                        )
+                        if retry_delay is None:
+                            retry_delay = float(2**attempt)
+                        remaining = self._remaining()
+                        if remaining <= 0 or retry_delay >= remaining:
+                            raise RedditRequestError(
+                                f"{message}; повтор отменён: превышен общий срок запуска "
+                                f"(попыток: {attempt})"
+                            )
+                    else:
                         body, read_error = self._read_bounded_body(response)
-                    except (httpx.HTTPError, ValueError):
-                        body, read_error = None, "тело ошибки не удалось прочитать"
-                    detail = _error_detail(body) if body else ""
-                    context = detail or read_error
-                    suffix = f": {context}" if context else ""
-                    raise RedditRequestError(f"Arctic Shift вернул HTTP {status}{suffix}")
-                body, read_error = self._read_bounded_body(response)
-                if read_error == "истёк срок чтения ответа":
-                    raise RedditRequestError("Превышен срок получения данных Reddit")
-                if read_error:
-                    raise RedditRequestError("Ответ Arctic Shift превышает допустимый размер")
-            data = json.loads(body or b"")
-        except RedditRequestError:
-            raise
-        except httpx.HTTPError as exc:
-            raise RedditRequestError(
-                f"Не удалось выполнить запрос к Arctic Shift ({type(exc).__name__})"
-            ) from exc
-        except ValueError as exc:
-            raise RedditRequestError("Arctic Shift вернул некорректный JSON") from exc
+                        if read_error == "истёк срок чтения ответа":
+                            raise RedditRequestError("Превышен срок получения данных Reddit")
+                        if read_error:
+                            raise RedditRequestError(
+                                "Ответ Arctic Shift превышает допустимый размер"
+                            )
+            except RedditRequestError:
+                raise
+            except httpx.HTTPError as exc:
+                raise RedditRequestError(
+                    f"Не удалось выполнить запрос к Arctic Shift ({type(exc).__name__})"
+                ) from exc
+            except ValueError as exc:
+                raise RedditRequestError("Arctic Shift вернул некорректный JSON") from exc
+            if retry_delay is not None:
+                self._sleep(retry_delay)
+                continue
+            try:
+                data = json.loads(body or b"")
+            except ValueError as exc:
+                raise RedditRequestError("Arctic Shift вернул некорректный JSON") from exc
+            break
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise RedditRequestError("Arctic Shift вернул ответ без массива data")
         rows = data["data"]
