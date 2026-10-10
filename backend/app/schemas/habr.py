@@ -74,3 +74,15 @@ class HabrSyncResponse(BaseModel):
     fetched: int
     saved: int
     skipped: int
+
+
+class FeedItemResponse(BaseModel):
+    id: int
+    external_id: str
+    title: str | None
+    body_text: str
+    original_url: str
+    author: str | None
+    published_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)

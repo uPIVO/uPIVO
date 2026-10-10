@@ -1,3 +1,4 @@
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
@@ -6,6 +7,8 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 class HabrClient:
@@ -49,8 +52,9 @@ class HabrClient:
                 response = await client.get(url, params=params)
                 if response.status_code == 200:
                     return response.json()
+                logger.warning("Habr article list API returned HTTP %s", response.status_code)
         except Exception:
-            pass
+            logger.warning("Habr article list API failed; trying RSS", exc_info=True)
 
         if page == 1:
             return await self._fetch_from_rss()
@@ -66,7 +70,7 @@ class HabrClient:
         root = ET.fromstring(rss_text)
         channel = root.find("channel")
         if channel is None:
-            return {"articleIds": [], "articleRefs": {}}
+            raise ValueError("Habr RSS has no channel element")
 
         article_ids = []
         article_refs = {}
@@ -128,7 +132,7 @@ class HabrClient:
                     if text_html:
                         return self.clean_html(text_html)
         except Exception:
-            pass
+            logger.warning("Habr full article API failed for %s", article_id, exc_info=True)
 
         # Если через API не отдало, загружаем веб-страницу статьи
         page_url = f"https://habr.com/ru/articles/{article_id}/"
@@ -144,6 +148,6 @@ class HabrClient:
                     if article:
                         return self.clean_html(str(article))
         except Exception:
-            pass
+            logger.warning("Habr article page failed for %s", article_id, exc_info=True)
 
         return ""

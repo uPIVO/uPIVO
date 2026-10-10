@@ -1,5 +1,7 @@
 """Store Habr articles in the shared source/feed item tables."""
 
+import asyncio
+import logging
 from datetime import UTC
 
 from sqlalchemy import select
@@ -10,6 +12,8 @@ from app.models.enums import SourceType
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.schemas.habr import HabrArticlePayload, HabrSyncResponse
+
+logger = logging.getLogger(__name__)
 
 
 class HabrService:
@@ -51,47 +55,68 @@ class HabrService:
                 ).all()
             )
 
+            new_ids = []
             for article_id in article_ids:
                 if article_id in existing or article_id in seen:
                     skipped += 1
-                    continue
+                else:
+                    seen.add(article_id)
+                    new_ids.append(article_id)
+
+            full_texts = await asyncio.gather(
+                *(self.client.get_full_article_content(article_id) for article_id in new_ids),
+                return_exceptions=True,
+            )
+            for article_id, full_text in zip(new_ids, full_texts, strict=True):
                 raw = data.get("articleRefs", {}).get(article_id)
                 if not isinstance(raw, dict):
+                    logger.warning("Habr article %s is missing from articleRefs", article_id)
                     continue
-                article = HabrArticlePayload.model_validate(raw)
-                content = await self.client.get_full_article_content(article_id)
-                if not content:
-                    content = self.client.clean_html(
-                        article.text_html or (article.lead_data or {}).get("textHtml", "")
-                    )
+                try:
+                    article = HabrArticlePayload.model_validate(raw)
+                    if isinstance(full_text, Exception):
+                        logger.warning(
+                            "Habr full text failed for article %s",
+                            article_id,
+                            exc_info=full_text,
+                        )
+                    content = full_text if isinstance(full_text, str) and full_text else ""
+                    if not content:
+                        content = self.client.clean_html(
+                            article.text_html or (article.lead_data or {}).get("textHtml", "")
+                        )
 
-                url = f"https://habr.com/ru/articles/{article_id}/"
-                title = self.client.clean_html(article.title_html)
-                author = article.author.alias if article.author else "Unknown"
-                published = article.time_published.astimezone(UTC).replace(tzinfo=None)
-                self.db.add(
-                    FeedItem(
-                        source_id=source.id,
-                        external_id=article_id,
-                        title=title,
-                        body_text=content,
-                        original_url=url,
-                        author=author,
-                        published_at=published,
-                        raw_payload={
-                            "kind": "habr_article",
-                            "title": title,
-                            "body_text": content,
-                            "original_url": url,
-                            "author": author,
-                            "published_at": published.isoformat(),
-                            "hubs": [hub.title for hub in article.hubs],
-                            "tags": [tag.title_html for tag in article.tags],
-                        },
+                    url = f"https://habr.com/ru/articles/{article_id}/"
+                    title = self.client.clean_html(article.title_html)
+                    author = article.author.alias if article.author else "Unknown"
+                    published = article.time_published.astimezone(UTC).replace(tzinfo=None)
+                    self.db.add(
+                        FeedItem(
+                            source_id=source.id,
+                            external_id=article_id,
+                            title=title,
+                            body_text=content,
+                            original_url=url,
+                            author=author,
+                            published_at=published,
+                            raw_payload={
+                                "kind": "habr_article",
+                                "title": title,
+                                "body_text": content,
+                                "original_url": url,
+                                "author": author,
+                                "published_at": published.isoformat(),
+                                "hubs": [hub.title for hub in article.hubs],
+                                "tags": [tag.title_html for tag in article.tags],
+                            },
+                        )
                     )
-                )
-                seen.add(article_id)
-                saved += 1
+                    saved += 1
+                except Exception:
+                    logger.exception("Habr article %s could not be stored", article_id)
+
+        if fetched and not saved and not skipped:
+            raise ValueError("No fetched Habr articles could be stored")
 
         self.db.commit()
         return HabrSyncResponse(fetched=fetched, saved=saved, skipped=skipped)

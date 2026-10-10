@@ -1,11 +1,17 @@
 import asyncio
+import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
 
 from app.connectors.habr.client import HabrClient
-from app.schemas.habr import HabrPostBase
+from app.db.session import get_db
+from app.schemas.habr import FeedItemResponse, HabrPostBase, HabrSyncRequest, HabrSyncResponse
+from app.services.habr import HabrService
 
 router = APIRouter(prefix="/habr", tags=["Habr Parser"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/preview", response_model=list[HabrPostBase], summary="Парсинг полных статей с Хабра")
@@ -16,6 +22,7 @@ async def preview_habr_posts(
     try:
         data = await client.get_articles_page(page=1)
     except Exception as exc:
+        logger.exception("Habr article list fetch failed")
         raise HTTPException(status_code=502, detail="Не удалось получить статьи Хабра") from exc
 
     article_ids = data.get("articleIds", [])[:limit]
@@ -34,6 +41,7 @@ async def preview_habr_posts(
     for art_id, full_content in zip(article_ids, full_texts, strict=True):
         raw = article_refs.get(str(art_id))
         if not raw:
+            logger.warning("Habr article %s is missing from articleRefs", art_id)
             continue
 
         try:
@@ -44,6 +52,10 @@ async def preview_habr_posts(
             if isinstance(full_content, str) and full_content:
                 final_content = full_content
             else:
+                if isinstance(full_content, Exception):
+                    logger.warning(
+                        "Habr full text failed for article %s", art_id, exc_info=full_content
+                    )
                 final_content = client.clean_html(raw.get("textHtml") or "")
 
             results.append(
@@ -65,6 +77,31 @@ async def preview_habr_posts(
                 )
             )
         except Exception:
+            logger.exception("Habr article %s could not be parsed", art_id)
             continue
 
+    if not results:
+        raise HTTPException(status_code=502, detail="Не удалось обработать статьи Хабра")
     return results
+
+
+@router.post("/sync", response_model=HabrSyncResponse, summary="Сохранить статьи Хабра")
+async def sync_habr_posts(
+    payload: HabrSyncRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    try:
+        return await HabrService(db).sync_publications(pages=payload.pages, sort=payload.sort)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Habr article sync failed")
+        raise HTTPException(status_code=502, detail="Не удалось сохранить статьи Хабра") from exc
+
+
+@router.get("/saved", response_model=list[FeedItemResponse], summary="Сохранённые статьи Хабра")
+def list_saved_habr_posts(
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    return HabrService(db).get_posts(limit=limit, offset=offset)

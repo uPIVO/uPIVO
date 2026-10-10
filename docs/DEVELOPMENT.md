@@ -88,6 +88,10 @@ uv run python -m app.connectors.youtube "https://www.youtube.com/@GoogleDevelope
 текст из списка публикаций. `HabrService` в `backend/app/services/habr.py` можно
 вызвать из backend-кода с обычной SQLAlchemy `Session`; он записывает статьи в
 общие таблицы `sources` и `feed_items`. Для предпросмотра база данных не нужна.
+`POST /api/habr/sync` с JSON `{"pages": 1}` запускает сохранение, а
+`GET /api/habr/saved` показывает сохранённые статьи. Для этих запросов нужна БД.
+Если статьи получены, но ни одну не удалось обработать, предпросмотр возвращает
+HTTP 502; ошибки отдельных статей записываются в лог.
 
 ## Нормализация контента
 
