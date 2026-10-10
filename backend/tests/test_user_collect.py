@@ -288,7 +288,7 @@ def test_normalize_hook_maps_collected_payload():
     result = collect_for_user(session, "demo@example.com", youtube=yt, normalize=True)
     assert result.outcomes[0].normalized == 1
     item = session.items[0]
-    assert item.processing_status is ProcessingStatus.PROCESSED
+    assert item.processing_status is ProcessingStatus.NORMALIZED
     assert item.body_text == "Hello from the transcript.\n\nThis is caption line two."
     assert item.content_hash is not None
     assert len(item.content_hash) == 64
@@ -422,7 +422,11 @@ def test_cli_rejects_limit_zero():
     assert main(["--user", "1", "--limit", "0"]) == 2
 
 
-def test_cli_requires_user():
-    with pytest.raises(SystemExit) as exc:
-        main([])
-    assert exc.value.code == 2
+def test_cli_defaults_to_active_source_sync(monkeypatch, capsys):
+    async def fake_sync_active_sources(*, limit):
+        assert limit is None
+        return []
+
+    monkeypatch.setattr("app.services.__main__.sync_active_sources", fake_sync_active_sources)
+    assert main([]) == 0
+    assert capsys.readouterr().err == ""

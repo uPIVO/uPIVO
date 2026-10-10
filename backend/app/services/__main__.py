@@ -1,7 +1,8 @@
-"""CLI: collect shared feed_items for one user's enabled sources.
+"""CLI: sync each active shared source once, or use legacy per-user collection.
 
 Usage (from backend/, PostgreSQL up, migrations applied, user + user_sources exist):
 
+    uv run python -m app.services
     uv run python -m app.services --user demo@example.com
     uv run python -m app.services --user 1
     uv run python -m app.services --user demo@example.com --dry-run
@@ -11,6 +12,7 @@ Usage (from backend/, PostgreSQL up, migrations applied, user + user_sources exi
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -22,25 +24,23 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_engine
 from app.services.collect import UnknownUserError, UserCollectResult, collect_for_user
+from app.services.source_sync import sync_active_sources
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Collect from the sources this user enabled. YouTube uses the existing "
-            "channel connector; other source types are skipped. Writes shared feed_items."
-        )
+        description="Sync each active source once into shared feed_items. --user is legacy mode."
     )
     parser.add_argument(
         "--user",
-        required=True,
+        required=False,
         help="users.id or users.email",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        default=DEFAULT_LIMIT,
-        help=f"Max items per YouTube source (default {DEFAULT_LIMIT})",
+        default=None,
+        help=f"Max items per source (YouTube default {DEFAULT_LIMIT})",
     )
     parser.add_argument(
         "--dry-run",
@@ -56,9 +56,25 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(get_settings().log_level)
     logger = logging.getLogger("app.services")
 
-    if args.limit < 1:
+    if args.limit is not None and args.limit < 1:
         print("limit must be >= 1", file=sys.stderr)
         return 2
+    if args.user is None:
+        if args.dry_run or args.normalize:
+            parser.error("--dry-run and --normalize require --user")
+        try:
+            outcomes = asyncio.run(sync_active_sources(limit=args.limit))
+        except Exception:
+            logger.exception("Failed to list active sources")
+            print("Failed to list active sources", file=sys.stderr)
+            return 1
+        for row in outcomes:
+            print(
+                f"source_id={row.source_id} type={row.source_type} status={row.status} "
+                f"fetched={row.fetched} saved={row.saved} inserted={row.inserted} "
+                f"updated={row.updated} reason={row.reason or ''}"
+            )
+        return 1 if any(row.status == "failed" for row in outcomes) else 0
 
     engine = get_engine()
     try:
@@ -67,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = collect_for_user(
                     session,
                     args.user,
-                    limit=args.limit,
+                    limit=args.limit or DEFAULT_LIMIT,
                     dry_run=args.dry_run,
                     normalize=args.normalize,
                 )

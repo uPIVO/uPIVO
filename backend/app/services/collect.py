@@ -1,8 +1,8 @@
 """Collect shared feed_items for one user's enabled sources.
 
 sources stay global. user_sources says which of those THIS user turned on.
-500 users on one channel still means one source row and one fetch per run;
-items land in shared feed_items, not a per-user copy.
+This is a compatibility/dev path; production orchestration uses source_sync.
+Items land in shared feed_items, not a per-user copy.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def collect_for_user(
     normalize: bool = False,
     youtube: YouTubeConnector | None = None,
 ) -> UserCollectResult:
-    """Fetch enabled sources for one user. Caller commits. YouTube uses collect_channel."""
+    """Legacy per-user YouTube collection. Caller commits."""
     if limit < 1:
         raise InvalidSourceError("limit must be >= 1")
 

@@ -125,7 +125,7 @@ def _run_database(*, item_id: int | None, limit: int | None, dry_run: bool) -> i
                 mapped = outcome.content
                 processed += 1
                 print(
-                    f"{item.id}\tprocessed\t{mapped.content_hash}\t"
+                    f"{item.id}\tnormalized\t{mapped.content_hash}\t"
                     f"{mapped.title or ''}\t{mapped.original_url}"
                 )
             if dry_run:

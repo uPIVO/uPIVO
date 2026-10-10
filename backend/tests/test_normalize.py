@@ -197,7 +197,7 @@ def test_normalize_feed_item_writes_fields_keeps_raw_and_ai_columns():
     now = datetime(2026, 10, 6, 8, 0, 0)
     outcome = normalize_feed_item(item, now=now)
     assert outcome.ok
-    assert item.processing_status is ProcessingStatus.PROCESSED
+    assert item.processing_status is ProcessingStatus.NORMALIZED
     assert item.title == "Building a voice-to-print mirror with Gemini"
     assert item.body_text.startswith("Hello from the transcript")
     assert item.content_hash == outcome.content.content_hash
@@ -229,7 +229,7 @@ def test_normalize_pending_skips_non_pending_and_counts_failures():
     assert stats.processed == 1
     assert stats.failed == 1
     assert stats.skipped == 1
-    assert ok_item.processing_status is ProcessingStatus.PROCESSED
+    assert ok_item.processing_status is ProcessingStatus.NORMALIZED
     assert bad_item.processing_status is ProcessingStatus.FAILED
     assert done_item.processing_status is ProcessingStatus.PROCESSED
 

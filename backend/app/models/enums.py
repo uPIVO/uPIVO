@@ -15,6 +15,7 @@ class SourceType(StrEnum):
 class ProcessingStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
+    NORMALIZED = "normalized"
     PROCESSED = "processed"
     FAILED = "failed"
 

@@ -25,10 +25,16 @@
 ## Pipeline публикаций
 
 ```text
-external source → collection → raw_payload → normalization → FeedItem
-→ cheap entity extraction → extracted_entities → AI processing
-→ clustering / ranking → feed / digest
+collection → raw_payload → normalization → status=normalized
+→ future enrichment / clustering / ranking → status=processed
 ```
+
+Shared ingestion: enabled `user_sources` → DISTINCT `sources` → sync source once
+→ shared `feed_items`. `python -m app.services` запускает этот сценарий; один
+источник с несколькими подписчиками опрашивается один раз за запуск.
+
+User layer: `User` → `UserSource` → later relevance / ranking / feed / digest.
+Персональные действия не создают копии публикаций в `feed_items`.
 
 Общая модель FeedItem хранит `raw_payload JSONB` — исходные данные источника;
 `extracted_entities JSONB` предназначено для hashtags, mentions, URLs, tools/products
@@ -41,12 +47,12 @@ Reddit → Arctic Shift API → connectors/reddit → services/reddit → FeedIt
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
-`python -m app.services --user` собирает только источники из `user_sources`
-этого пользователя; запись всё равно в общие `sources` / `feed_items`.
+`python -m app.services --user` остаётся dev/compatibility сценарием для YouTube.
 Connector отвечает за доступ к источнику.
 `app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
 original_url / author / published_at, считает `content_hash` и ставит
-processed или failed. `raw_payload` не переписывается. CLI:
+normalized или failed. `processed` зарезервирован для полного будущего pipeline.
+`raw_payload` не переписывается. CLI:
 `python -m app.processing`.
 Session-файлы Telegram хранятся локально.
 
@@ -66,7 +72,8 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 - `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и состояния
   синхронизации Telegram и Reddit.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
-- `services`: сбор под пользователя (`python -m app.services --user`) и сохранение
+- `services`: сбор активных общих источников (`python -m app.services`),
+  dev/compatibility сбор под пользователя (`--user`) и сохранение
   Telegram/Reddit с курсорами; `sources` общие, `user_sources` — пользовательские настройки.
 - `connectors`: доступ к Telegram/web/RSS/Reddit; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
