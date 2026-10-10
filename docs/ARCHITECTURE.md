@@ -1,8 +1,8 @@
 # Архитектура Upivo
 
 Сейчас это один backend. Миграция `0002` добавляет общие таблицы `sources` и
-`feed_items`; `0003` — `users` и `user_sources`. Telegram сохраняет публикации и
-курсор через ручную CLI-команду. Автоматическое расписание пока не настроено.
+`feed_items`; `0003` — `users` и `user_sources`. Следующие миграции добавляют
+состояние синхронизации Telegram и Reddit. Автоматическое расписание пока не настроено.
 
 | Технология | Зачем Upivo |
 | --- | --- |
@@ -36,6 +36,8 @@ external source → collection → raw_payload → normalization → FeedItem
 
 Telegram API → Telethon → connectors/telegram → processing/telegram →
 services/telegram → FeedItem и курсор PostgreSQL.
+Reddit → Arctic Shift API → connectors/reddit → services/reddit → FeedItem и
+временной курсор PostgreSQL.
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
@@ -57,14 +59,16 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 
 ## Границы кода
 
-- `api`: HTTP-маршруты: `/health`, `/health/db` и предпросмотр Habr.
+- `api`: HTTP-маршруты: `/health`, `/health/db`, предпросмотр, сохранение и
+  просмотр сохранённых статей Habr.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `TelegramSyncState`.
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и состояния
+  синхронизации Telegram и Reddit.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: сбор под пользователя (`python -m app.services --user`) и сохранение
-  Telegram с курсором; `sources` общие, `user_sources` — пользовательские настройки.
-- `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
+  Telegram/Reddit с курсорами; `sources` общие, `user_sources` — пользовательские настройки.
+- `connectors`: доступ к Telegram/web/RSS/Reddit; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: нормализация `raw_payload` → поля FeedItem
   (`python -m app.processing`); extractors пока зарезервированы.

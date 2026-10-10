@@ -59,12 +59,8 @@ def _rss_handler(
 
 def test_source_type_includes_youtube_alongside_telegram_and_habr():
     assert SourceType.YOUTUBE.value == "youtube"
-    assert {item.value for item in SourceType} == {
-        "telegram",
-        "website",
-        "rss",
-        "habr",
-        "youtube",
+    assert {"telegram", "website", "rss", "habr", "youtube"} <= {
+        item.value for item in SourceType
     }
 
 
