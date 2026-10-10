@@ -109,3 +109,34 @@ uv run python -m app.processing
 ```
 
 `--dry-run` печатает результат без commit. `--limit N` и `--item-id ID` сужают выборку.
+
+## Сбор под пользователя
+
+Для выбранного пользователя читает `user_sources` (только `enabled`) и собирает
+общие `feed_items` по этим источникам. Один канал остаётся одной строкой `sources`.
+YouTube идёт через уже существующий `collect_channel`. Остальные типы источников
+пропускаются. Нет login/OAuth — пользователь задаётся `--user` (id или email).
+
+Нужны PostgreSQL и `alembic upgrade head`. Пользователь и связи `user_sources`
+должны уже быть в базе (колонка `password_hash` есть в схеме, авторизации нет —
+для локальной записи достаточно любого непустого значения):
+
+```sql
+INSERT INTO users (email, password_hash)
+VALUES ('demo@example.com', 'local-dev-not-auth');
+-- source_id — строка из sources, например после python -m app.connectors.youtube
+INSERT INTO user_sources (user_id, source_id) VALUES (1, 1);
+```
+
+Из `backend/`:
+
+```bash
+uv run python -m app.services --user demo@example.com
+uv run python -m app.services --user 1 --dry-run
+uv run python -m app.services --user demo@example.com --normalize
+```
+
+`--normalize` после записи прогоняет тот же hook, что `python -m app.processing`,
+только по только что собранным строкам. Нет источников / все выключены — `sources=0`
+или `status=skipped reason=disabled`, код 0. Неизвестный пользователь — код 2.
+Пустой fetch источника — `status=empty`. Сбой чтения YouTube — `status=failed`, код 1.

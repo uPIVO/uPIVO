@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.connectors.base import FetchResult
 from app.connectors.youtube.parser import DEFAULT_LIMIT, YouTubeConnector
 from app.connectors.youtube.persist import PersistStats, persist_fetch
+from app.models.source import Source
 
 __all__ = [
     "DEFAULT_LIMIT",
@@ -33,9 +34,14 @@ def collect_channel(
     *,
     limit: int = DEFAULT_LIMIT,
     connector: YouTubeConnector | None = None,
+    source: Source | None = None,
 ) -> tuple[FetchResult, PersistStats]:
-    """Fetch a channel RSS feed and upsert raw feed_items. Caller commits."""
+    """Fetch a channel RSS feed and upsert raw feed_items. Caller commits.
+
+    Pass `source` to update that catalog row (user_sources) instead of looking
+    up or inserting another YouTube source.
+    """
     client = connector or YouTubeConnector()
     fetch = client.fetch(url, limit=limit)
-    stats = persist_fetch(session, fetch)
+    stats = persist_fetch(session, fetch, source=source)
     return fetch, stats
