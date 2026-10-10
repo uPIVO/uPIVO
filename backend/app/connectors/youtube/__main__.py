@@ -45,25 +45,35 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(get_settings().log_level)
     logger = logging.getLogger("app.connectors.youtube")
 
-    try:
-        fetch = YouTubeConnector().fetch(args.url, limit=args.limit)
-    except InvalidSourceError as exc:
-        print(f"Invalid YouTube channel: {exc}", file=sys.stderr)
-        return 2
-    except SourceFetchError as exc:
-        print(f"Failed to read YouTube: {exc}", file=sys.stderr)
-        return 1
-    except ConnectorError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
     if args.dry_run:
+        try:
+            fetch = YouTubeConnector().fetch(args.url, limit=args.limit)
+        except InvalidSourceError as exc:
+            print(f"Invalid YouTube channel: {exc}", file=sys.stderr)
+            return 2
+        except SourceFetchError as exc:
+            print(f"Failed to read YouTube: {exc}", file=sys.stderr)
+            return 1
+        except ConnectorError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         _print_fetch(fetch)
         return 0
 
     engine = get_engine()
     try:
         with Session(engine) as session:
+            try:
+                fetch = YouTubeConnector().fetch(args.url, limit=args.limit, session=session)
+            except InvalidSourceError as exc:
+                print(f"Invalid YouTube channel: {exc}", file=sys.stderr)
+                return 2
+            except SourceFetchError as exc:
+                print(f"Failed to read YouTube: {exc}", file=sys.stderr)
+                return 1
+            except ConnectorError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
             stats = persist_fetch(session, fetch)
             session.commit()
     except Exception:

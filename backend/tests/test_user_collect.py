@@ -74,7 +74,9 @@ class ScriptedYouTube:
         self.by_url = by_url
         self.calls: list[tuple[str, int | None]] = []
 
-    def fetch(self, canonical_url: str, *, limit: int | None = None) -> FetchResult:
+    def fetch(
+        self, canonical_url: str, *, limit: int | None = None, session=None
+    ) -> FetchResult:
         self.calls.append((canonical_url, limit))
         result = self.by_url[canonical_url]
         if isinstance(result, BaseException):
