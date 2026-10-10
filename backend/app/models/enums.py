@@ -9,6 +9,7 @@ class SourceType(StrEnum):
     RSS = "rss"
     HABR = "habr"
     YOUTUBE = "youtube"
+    REDDIT = "reddit"
 
 
 class ProcessingStatus(StrEnum):

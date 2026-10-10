@@ -18,6 +18,12 @@ class Source(Base):
             unique=True,
             postgresql_where=text("type = 'telegram'"),
         ),
+        Index(
+            "uq_sources_reddit_external_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("type = 'reddit'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
