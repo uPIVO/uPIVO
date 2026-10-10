@@ -1,9 +1,8 @@
 # Архитектура Upivo
 
-Сейчас это один backend, без продуктовых HTTP-endpoint. Миграция `0002` добавляет
-таблицы `sources` и `feed_items` для сырого сбора; `0003` — `users` и `user_sources`
-(какие источники включил конкретный пользователь). Остальные этапы обработки —
-план для отдельных задач, а не уже реализованная функциональность.
+Сейчас это один backend. Миграция `0002` добавляет общие таблицы `sources` и
+`feed_items`; `0003` — `users` и `user_sources`. Telegram сохраняет публикации и
+курсор через ручную CLI-команду. Автоматическое расписание пока не настроено.
 
 | Технология | Зачем Upivo |
 | --- | --- |
@@ -11,7 +10,7 @@
 | PostgreSQL | Основное долговременное хранилище публикаций и будущих настроек |
 | SQLAlchemy 2 | Python-модели, SQL-запросы, соединения и sessions |
 | Alembic | Последовательные версии структуры базы данных |
-| Telethon | Python-клиент Telegram API для будущего сбора публикаций |
+| Telethon | Python-клиент Telegram API для ручного консольного сбора публикаций |
 | httpx | Скачивает страницу или обращается к внешнему HTTP API |
 | trafilatura | Извлекает основной текст статьи, убирая меню/рекламу/шум |
 | BeautifulSoup | Точечный разбор HTML там, где trafilatura недостаточно |
@@ -23,7 +22,7 @@
 | Docker/Compose | Единое воспроизводимое окружение API, БД и Redis |
 | Python logging | Timestamp, level, logger name, message; LOG_LEVEL через env |
 
-## Будущий pipeline
+## Pipeline публикаций
 
 ```text
 external source → collection → raw_payload → normalization → FeedItem
@@ -31,11 +30,12 @@ external source → collection → raw_payload → normalization → FeedItem
 → clustering / ranking → feed / digest
 ```
 
-Будущая модель FeedItem предусматривает `raw_payload JSONB` — оригинальные данные
-источника; `extracted_entities JSONB` — hashtags, mentions, URLs, tools/products
-и другие быстро извлечённые сущности без LLM. Формат и полную модель согласует команда.
+Общая модель FeedItem хранит `raw_payload JSONB` — исходные данные источника;
+`extracted_entities JSONB` предназначено для hashtags, mentions, URLs, tools/products
+и других быстро извлечённых сущностей без LLM. Извлечение сущностей остаётся отдельной задачей.
 
-Telegram API → Telethon → connectors/telegram → будущий FeedItem.
+Telegram API → Telethon → connectors/telegram → processing/telegram →
+services/telegram → FeedItem и курсор PostgreSQL.
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
@@ -57,13 +57,13 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 
 ## Границы кода
 
-- `api`: HTTP-маршруты; сейчас только `/health` и `/health/db` (SELECT 1).
+- `api`: HTTP-маршруты: `/health`, `/health/db` и предпросмотр Habr.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и enum `source_type` (включая youtube).
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `TelegramSyncState`.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
-- `services`: сбор под пользователя (`python -m app.services --user`);
-  `sources` общие, `user_sources` — какие из них включены у этого пользователя.
+- `services`: сбор под пользователя (`python -m app.services --user`) и сохранение
+  Telegram с курсором; `sources` общие, `user_sources` — пользовательские настройки.
 - `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: нормализация `raw_payload` → поля FeedItem
@@ -75,9 +75,9 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 API не подключается к БД при импорте/старте. `/health` проверяет процесс,
 `/health/db` проверяет БД и возвращает 503 без деталей ошибок при недоступности.
 Compose запускает миграции отдельно перед API; приложение не создаёт таблицы само.
-Session закрывается dependency; commit/rollback будущих записей выполняет код сценария.
+Session закрывается dependency; сценарии сбора выполняют commit/rollback своих записей.
 Нет автоматического commit после HTTP-запроса.
 
 Не вводим Firebase/OAuth/JWT до решения команды. Frontend Next.js + TypeScript
-начнётся в следующем модуле. Production hosting, auth, FeedItem и AI provider
+начнётся в следующем модуле. Production hosting, auth, продуктовые endpoint и AI provider
 остаются решениями техлида. Существующая инфраструктура предназначена для разработки.
