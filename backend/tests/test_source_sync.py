@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.connectors.habr.client import HabrClient
 from app.models.enums import SourceType
 from app.services import source_sync
 from app.services.source_sync import SourceSyncResult
@@ -114,3 +115,72 @@ def test_sync_source_delegates_to_reddit_service(monkeypatch):
     result = asyncio.run(source_sync.sync_source(20, session_factory=factory))
     assert calls == [(factory, "python", None)]
     assert (result.fetched, result.saved, result.status) == (4, 2, "collected")
+
+
+def test_sync_source_delegates_to_habr_service(monkeypatch):
+    source = SimpleNamespace(
+        id=30, type=SourceType.HABR, canonical_url=HabrClient.RSS_URL,
+        external_id="habr:articles",
+    )
+    sessions = []
+    calls = []
+
+    def factory():
+        session = _SourceSession(source)
+        sessions.append(session)
+        return session
+
+    class FakeHabrService:
+        def __init__(self, session):
+            calls.append(session)
+
+        async def sync_publications(self):
+            return SimpleNamespace(fetched=5, saved=2)
+
+    monkeypatch.setattr(source_sync, "HabrService", FakeHabrService)
+    result = asyncio.run(source_sync.sync_source(30, session_factory=factory))
+    assert calls == [sessions[-1]]
+    assert result == SourceSyncResult(
+        source_id=30, source_type="habr", status="collected",
+        fetched=5, saved=2, inserted=2, updated=0,
+    )
+
+
+def test_sync_source_delegates_to_telegram_service(monkeypatch):
+    url = "https://t.me/example_channel"
+    source = SimpleNamespace(
+        id=40, type=SourceType.TELEGRAM, canonical_url=url, external_id="-10012345",
+    )
+    channel = object()
+    calls = []
+
+    def factory():
+        return _SourceSession(source)
+
+    class FakeTelegramConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def resolve_channel(self, given_url):
+            calls.append(("resolve", given_url))
+            return channel
+
+    async def fake_sync(given_channel, connector, given_factory, *, limit):
+        calls.append(("sync", given_channel, connector, given_factory, limit))
+        return 3, 99
+
+    monkeypatch.setattr(source_sync, "TelegramConnector", FakeTelegramConnector)
+    monkeypatch.setattr(source_sync, "map_channel", lambda _: {"external_id": "-10012345"})
+    monkeypatch.setattr(source_sync, "sync_telegram_channel", fake_sync)
+    result = asyncio.run(source_sync.sync_source(40, session_factory=factory, limit=7))
+    assert calls[0] == ("resolve", url)
+    assert calls[1][0] == "sync"
+    assert calls[1][1] is channel
+    assert isinstance(calls[1][2], FakeTelegramConnector)
+    assert calls[1][3:] == (factory, 7)
+    assert result == SourceSyncResult(
+        source_id=40, source_type="telegram", status="collected", fetched=3, saved=3,
+    )

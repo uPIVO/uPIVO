@@ -25,5 +25,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # PostgreSQL cannot safely remove one enum value without rebuilding the type.
-    pass
+    # Keep the enum value, but make stored rows readable by the previous app version.
+    op.execute(
+        "UPDATE feed_items SET processing_status = 'processed' "
+        "WHERE processing_status = 'normalized'"
+    )
