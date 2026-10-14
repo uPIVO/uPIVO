@@ -47,9 +47,11 @@ Reddit → Arctic Shift API → connectors/reddit → services/reddit → FeedIt
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
-`python -m app.services --user` запускает тот же общий сбор активных источников
-и показывает результаты только для включённых источников указанного пользователя.
-Он не запускает отдельный сбор на каждого подписчика.
+`python -m app.services --user` — dev/CLI запуск: синхронизирует только включённые
+источники указанного пользователя через общий dispatcher. Готовые результаты
+общего запуска можно передать нескольким пользователям без повторного сбора.
+Будущий Feed/Digest HTTP API читает сохранённые `feed_items` и не запускает collection.
+YouTube и Habr идентифицируются уникальным `external_id` в рамках своего типа.
 Connector отвечает за доступ к источнику.
 `app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
 original_url / author / published_at, считает `content_hash` и ставит

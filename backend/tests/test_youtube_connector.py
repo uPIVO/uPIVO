@@ -294,8 +294,20 @@ class _FakeSession:
             self.source.id = 7
 
 
-def test_persist_inserts_source_and_raw_feed_items():
+def test_persist_inserts_source_and_raw_feed_items(monkeypatch):
     session = _FakeSession()
+    def fake_upsert(given_session, fetch, stamp):
+        source = Source(
+            type=SourceType.YOUTUBE,
+            name=fetch.source_name,
+            canonical_url=fetch.canonical_url,
+            external_id=fetch.source_external_id,
+            last_synced_at=stamp,
+        )
+        given_session.add(source)
+        return source
+
+    monkeypatch.setattr("app.connectors.youtube.persist._upsert_source", fake_upsert)
     fetch = FetchResult(
         source_name="Google for Developers",
         source_external_id=CHANNEL_ID,
@@ -358,7 +370,7 @@ def test_persist_updates_existing_video_by_external_id():
             )
         ],
     )
-    stats = persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0))
+    stats = persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0), source=source)
     assert stats.inserted == 0
     assert stats.updated == 1
     assert existing.title == "New title"
@@ -476,7 +488,7 @@ def test_persist_keeps_existing_transcript_when_incoming_has_none():
             )
         ],
     )
-    persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0))
+    persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0), source=source)
     assert existing.title == "New title"
     assert existing.body_text == "already stored transcript"
     assert existing.raw_payload["transcript"] == "already stored transcript"

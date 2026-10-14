@@ -5,6 +5,7 @@ import logging
 from datetime import UTC
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.connectors.habr.client import HabrClient
@@ -22,21 +23,21 @@ class HabrService:
         self.client = client or HabrClient()
 
     async def sync_publications(self, pages: int = 1, sort: str = "date") -> HabrSyncResponse:
-        source = self.db.scalar(
-            select(Source).where(
-                Source.type == SourceType.HABR,
-                Source.canonical_url == HabrClient.RSS_URL,
-            )
-        )
-        if source is None:
-            source = Source(
+        source_id = self.db.scalar(
+            insert(Source)
+            .values(
                 type=SourceType.HABR,
                 name="Habr",
                 canonical_url=HabrClient.RSS_URL,
                 external_id="habr:articles",
             )
-            self.db.add(source)
-            self.db.flush()
+            .on_conflict_do_update(
+                index_elements=[Source.external_id],
+                index_where=Source.type == SourceType.HABR,
+                set_={"canonical_url": HabrClient.RSS_URL},
+            )
+            .returning(Source.id)
+        )
 
         fetched = saved = skipped = 0
         seen: set[str] = set()
@@ -49,7 +50,7 @@ class HabrService:
             existing = set(
                 self.db.scalars(
                     select(FeedItem.external_id).where(
-                        FeedItem.source_id == source.id,
+                        FeedItem.source_id == source_id,
                         FeedItem.external_id.in_(article_ids),
                     )
                 ).all()
@@ -92,7 +93,7 @@ class HabrService:
                     published = article.time_published.astimezone(UTC).replace(tzinfo=None)
                     self.db.add(
                         FeedItem(
-                            source_id=source.id,
+                            source_id=source_id,
                             external_id=article_id,
                             title=title,
                             body_text=content,

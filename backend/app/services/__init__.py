@@ -15,7 +15,12 @@ from app.services.collect import (
     collect_for_user,
     resolve_user,
 )
-from app.services.source_sync import SourceSyncResult, sync_active_sources, sync_source
+from app.services.source_sync import (
+    SourceSyncResult,
+    sync_active_sources,
+    sync_source,
+    sync_sources,
+)
 
 __all__ = [
     "SourceSyncResult",
@@ -25,4 +30,5 @@ __all__ = [
     "resolve_user",
     "sync_active_sources",
     "sync_source",
+    "sync_sources",
 ]

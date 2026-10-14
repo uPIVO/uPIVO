@@ -52,6 +52,22 @@ def test_active_sources_sync_once_per_distinct_enabled_source(monkeypatch, links
     engine.dispose()
 
 
+def test_sync_sources_deduplicates_explicit_ids(monkeypatch):
+    calls = []
+
+    async def fake_sync_source(source_id, *, session_factory, limit):
+        calls.append((source_id, session_factory, limit))
+        return SourceSyncResult(source_id, "youtube", "empty")
+
+    monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
+    factory = object()
+    results = asyncio.run(
+        source_sync.sync_sources([20, 10, 20, 10], session_factory=factory, limit=3)
+    )
+    assert calls == [(10, factory, 3), (20, factory, 3)]
+    assert [row.source_id for row in results] == [10, 20]
+
+
 class _SourceSession:
     def __init__(self, source):
         self.source = source

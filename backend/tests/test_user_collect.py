@@ -68,12 +68,26 @@ def test_user_sees_all_four_types_from_one_shared_run(monkeypatch, subscriptions
     result = asyncio.run(
         collect_for_user("one@example.com", session_factory=subscriptions)
     )
-    assert calls == [10, 20, 30, 40, 50]
+    assert calls == [10, 20, 30, 40]
     assert [(row.source_id, row.source_type) for row in result.outcomes] == [
         (10, "youtube"), (20, "telegram"), (30, "reddit"), (40, "habr")
     ]
     assert result.collected == 4
     assert result.user_id == 1
+
+
+def test_user_with_three_enabled_sources_does_not_sync_other_users_sources(
+    monkeypatch, subscriptions
+):
+    calls = _fake_dispatch(monkeypatch)
+    with subscriptions() as session:
+        session.execute(
+            text("UPDATE user_sources SET enabled = 0 WHERE user_id = 1 AND source_id = 40")
+        )
+        session.commit()
+    result = asyncio.run(collect_for_user("1", session_factory=subscriptions))
+    assert calls == [10, 20, 30]
+    assert [row.source_id for row in result.outcomes] == [10, 20, 30]
 
 
 def test_two_users_share_one_fetch_and_keep_distinct_enabled_sources(monkeypatch, subscriptions):

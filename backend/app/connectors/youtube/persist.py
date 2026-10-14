@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.connectors.base import FetchResult
@@ -34,22 +35,7 @@ def persist_fetch(
 ) -> PersistStats:
     stamp = now or datetime.now(UTC).replace(tzinfo=None)
     if source is None:
-        source = session.scalar(
-            select(Source).where(
-                Source.type == SourceType.YOUTUBE,
-                Source.external_id == fetch.source_external_id,
-            )
-        )
-    if source is None:
-        source = Source(
-            type=SourceType.YOUTUBE,
-            name=_clip(fetch.source_name, 255) or fetch.source_external_id,
-            canonical_url=fetch.canonical_url,
-            external_id=fetch.source_external_id,
-            last_synced_at=stamp,
-        )
-        session.add(source)
-        session.flush()
+        source = _upsert_source(session, fetch, stamp)
     else:
         source.name = _clip(fetch.source_name, 255) or source.name
         source.canonical_url = fetch.canonical_url
@@ -103,6 +89,30 @@ def persist_fetch(
             current.updated_at = stamp
             updated += 1
     return PersistStats(source_id=source.id, inserted=inserted, updated=updated)
+
+
+def _upsert_source(session: Session, fetch: FetchResult, stamp: datetime) -> Source:
+    if not fetch.source_external_id:
+        raise ValueError("YouTube source requires a channel external_id")
+    name = _clip(fetch.source_name, 255) or fetch.source_external_id
+    stmt = (
+        insert(Source)
+        .values(
+            type=SourceType.YOUTUBE,
+            name=name,
+            canonical_url=fetch.canonical_url,
+            external_id=fetch.source_external_id,
+            last_synced_at=stamp,
+        )
+        .on_conflict_do_update(
+            index_elements=[Source.external_id],
+            index_where=Source.type == SourceType.YOUTUBE,
+            set_={"name": name, "canonical_url": fetch.canonical_url, "last_synced_at": stamp},
+        )
+        .returning(Source.id)
+    )
+    source_id = session.scalar(stmt)
+    return session.get(Source, source_id)
 
 
 def load_existing_transcripts(

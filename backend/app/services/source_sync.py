@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -135,7 +136,20 @@ async def sync_active_sources(
             .distinct()
             .order_by(Source.id)
         ).all()
+    return await sync_sources(source_ids, session_factory=factory, limit=limit)
+
+
+async def sync_sources(
+    source_ids: Iterable[int],
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+    limit: int | None = None,
+) -> list[SourceSyncResult]:
+    """Sync each requested source once through the shared dispatcher."""
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1")
+    factory = _session_factory(session_factory)
     return [
         await sync_source(source_id, session_factory=factory, limit=limit)
-        for source_id in source_ids
+        for source_id in sorted(set(source_ids))
     ]
