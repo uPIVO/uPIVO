@@ -47,7 +47,11 @@ Reddit → Arctic Shift API → connectors/reddit → services/reddit → FeedIt
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
-`python -m app.services --user` остаётся dev/compatibility сценарием для YouTube.
+`python -m app.services --user` — dev/CLI запуск: синхронизирует только включённые
+источники указанного пользователя через общий dispatcher. Готовые результаты
+общего запуска можно передать нескольким пользователям без повторного сбора.
+Будущий Feed/Digest HTTP API читает сохранённые `feed_items` и не запускает collection.
+YouTube и Habr идентифицируются уникальным `external_id` в рамках своего типа.
 Connector отвечает за доступ к источнику.
 `app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
 original_url / author / published_at, считает `content_hash` и ставит
@@ -73,7 +77,7 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
   синхронизации Telegram и Reddit.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: сбор активных общих источников (`python -m app.services`),
-  dev/compatibility сбор под пользователя (`--user`) и сохранение
+  выборка результата для пользователя (`--user`) и сохранение
   Telegram/Reddit с курсорами; `sources` общие, `user_sources` — пользовательские настройки.
 - `connectors`: доступ к Telegram/web/RSS/Reddit; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
