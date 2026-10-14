@@ -2,7 +2,7 @@
 
 After connectors dump raw rows, this step fills title, body_text, original_url,
 author, published_at and content_hash. raw_payload is left as collected.
-processing_status moves pending → processed / failed.
+processing_status moves pending → normalized / failed.
 
 Connectors may call `normalize_feed_item` after persist. CLI from backend/:
 
