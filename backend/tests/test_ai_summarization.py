@@ -485,6 +485,51 @@ def test_openrouter_rejects_malformed_or_empty_responses(response: httpx.Respons
         _run(request_summary())
 
 
+
+@pytest.mark.parametrize(
+    ("finish_reason", "top_level_error", "message_error", "accepted"),
+    [
+        ("length", None, None, False),
+        ("content_filter", None, None, False),
+        ("error", None, None, False),
+        ("stop", {"message": "секретное сообщение"}, None, False),
+        ("stop", None, {"message": "секретное сообщение"}, False),
+        ("stop", None, None, True),
+        (None, None, None, True),
+    ],
+)
+def test_openrouter_only_accepts_successful_completion(
+    finish_reason: str | None,
+    top_level_error: Any,
+    message_error: Any,
+    accepted: bool,
+) -> None:
+    message: dict[str, Any] = {"content": "Частичная выжимка"}
+    if message_error is not None:
+        message["error"] = message_error
+    choice: dict[str, Any] = {"message": message}
+    if finish_reason is not None:
+        choice["finish_reason"] = finish_reason
+    payload: dict[str, Any] = {"choices": [choice]}
+    if top_level_error is not None:
+        payload["error"] = top_level_error
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async def request_summary() -> SummaryResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await OpenRouterAdapter(_settings(), client=client).summarize(_unit())
+
+    if accepted:
+        assert _run(request_summary()).summary == "Частичная выжимка"
+    else:
+        with pytest.raises(LLMError) as exc_info:
+            _run(request_summary())
+        assert "Частичная выжимка" not in str(exc_info.value)
+        assert "секретное сообщение" not in str(exc_info.value)
+
+
 def test_cli_prior_result_round_trip_is_database_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -512,6 +557,44 @@ def test_cli_prior_result_round_trip_is_database_free(
     assert second_output["result"]["summary"] == first_output["result"]["summary"]
     assert second_output["result"]["usage"]["total_tokens"] == 53
     assert adapter.calls == 1
+
+
+
+def test_cli_failed_force_preserves_existing_result_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.ai import __main__ as cli
+
+    class _FailingAdapter(_FakeAdapter):
+        async def summarize(self, unit: ContentUnitInput) -> SummaryResult:
+            self.calls += 1
+            raise LLMError("OpenRouter вернул пустую выжимку.")
+
+    input_path = tmp_path / "unit.json"
+    result_path = tmp_path / "summary.json"
+    input_path.write_text(json.dumps(_unit().model_dump(mode="json")), encoding="utf-8")
+    existing_result = _run(SummarizationService(_FakeAdapter()).summarize(_unit())).result
+    result_path.write_text(existing_result.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    original_contents = result_path.read_bytes()
+    failing_adapter = _FailingAdapter()
+    monkeypatch.setattr(cli, "OpenRouterAdapter", lambda settings: failing_adapter)
+
+    exit_code = cli.main(
+        [
+            str(input_path),
+            "--prior-result",
+            str(result_path),
+            "--save-result",
+            str(result_path),
+            "--force",
+        ]
+    )
+    stderr = capsys.readouterr().err
+
+    assert exit_code == 2
+    assert failing_adapter.calls == 1
+    assert result_path.read_bytes() == original_contents
+    assert "пустую выжимку" in stderr
 
 
 def test_cli_rejects_invalid_json_without_echoing_fixture_contents(

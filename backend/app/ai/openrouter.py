@@ -164,11 +164,23 @@ class OpenRouterAdapter:
     def _read_summary(payload: Any) -> str:
         if not isinstance(payload, dict):
             raise LLMError("OpenRouter вернул некорректный ответ.")
+        if payload.get("error") is not None:
+            raise LLMError("OpenRouter вернул ответ с ошибкой.")
+
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise LLMError("OpenRouter не вернул выжимку.")
-        message = choices[0].get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and finish_reason != "stop":
+            raise LLMError("OpenRouter не завершил генерацию выжимки.")
+
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise LLMError("OpenRouter вернул некорректную выжимку.")
+        if message.get("error") is not None:
+            raise LLMError("OpenRouter вернул ошибку в сообщении.")
+        if not isinstance(message.get("content"), str):
             raise LLMError("OpenRouter вернул некорректную выжимку.")
         summary = message["content"].strip()
         if not summary:
