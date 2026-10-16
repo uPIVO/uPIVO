@@ -404,7 +404,7 @@ def test_openrouter_fingerprint_covers_prompt_version(monkeypatch: pytest.Monkey
 
     adapter = OpenRouterAdapter(_settings())
     before = adapter.fingerprint_for(_unit())
-    monkeypatch.setattr(openrouter, "PROMPT_VERSION", "content-summary-v2")
+    monkeypatch.setattr(openrouter, "PROMPT_VERSION", "content-summary-v3")
 
     assert adapter.fingerprint_for(_unit()) != before
 
