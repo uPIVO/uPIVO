@@ -1,9 +1,13 @@
 from typing import Protocol
 
+from app.ai.dto import ContentUnitInput, SummaryResult
+
+
+class LLMError(RuntimeError):
+    """Ошибка суммаризации без данных провайдера или исходного текста."""
+
 
 class LLMAdapter(Protocol):
-    """Provider-neutral contract; no provider or API calls implemented."""
+    def fingerprint_for(self, unit: ContentUnitInput) -> str: ...
 
-    async def summarize(self, text: str) -> str: ...
-
-    async def score_relevance(self, text: str, topic: str) -> float: ...
+    async def summarize(self, unit: ContentUnitInput) -> SummaryResult: ...

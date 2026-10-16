@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
@@ -17,8 +17,11 @@ class Settings(BaseSettings):
     telegram_api_id: str = ""
     telegram_api_hash: SecretStr = SecretStr("")
     telegram_session: SecretStr = SecretStr("")
-    llm_provider: str = ""
+    llm_provider: str = "openrouter"
     llm_api_key: SecretStr = SecretStr("")
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+    llm_model: str = "@preset/deep-seek-v4-flash-via-direct-deep-seek-provider"
+    llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     log_level: str = "INFO"
 
 

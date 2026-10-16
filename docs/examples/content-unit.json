@@ -1,0 +1,28 @@
+{
+  "id": 17,
+  "title": "Запуск пилотного проекта",
+  "feed_items": [
+    {
+      "feed_item_id": 1201,
+      "title": "Компания начала пилотный запуск",
+      "body_text": "Компания объявила о начале пилотного запуска сервиса в октябре 2026 года. В тестировании участвуют 12 организаций.",
+      "original_url": "https://example.org/news/pilot-launch",
+      "published_at": "2026-10-16T09:30:00",
+      "source_name": "Первый источник",
+      "extracted_entities": {
+        "organizations": ["Компания", "12 организаций"],
+        "event": "пилотный запуск"
+      },
+      "is_primary": true
+    },
+    {
+      "feed_item_id": 1202,
+      "title": "Пилот продлится до конца года",
+      "body_text": "По данным компании, тестовая программа началась в октябре и продлится до декабря 2026 года. В ней участвуют 12 организаций.",
+      "original_url": "https://example.net/technology/pilot",
+      "published_at": "2026-10-16T10:15:00",
+      "source_name": "Второй источник",
+      "is_primary": false
+    }
+  ]
+}
