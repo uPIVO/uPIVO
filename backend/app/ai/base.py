@@ -1,6 +1,13 @@
 from typing import Protocol
 
-from app.ai.dto import ContentUnitInput, RelevanceInput, RelevanceResult, SummaryResult
+from app.ai.dto import (
+    ContentUnitInput,
+    ImportanceComponents,
+    ImportanceInput,
+    RelevanceInput,
+    RelevanceResult,
+    SummaryResult,
+)
 
 
 class LLMError(RuntimeError):
@@ -17,3 +24,9 @@ class RelevanceAdapter(Protocol):
     def fingerprint_for(self, value: RelevanceInput) -> str: ...
 
     async def score_relevance(self, value: RelevanceInput) -> RelevanceResult: ...
+
+
+class ImportanceAdapter(Protocol):
+    def fingerprint_for(self, value: ImportanceInput) -> str: ...
+
+    async def score_importance(self, value: ImportanceInput) -> ImportanceComponents: ...
