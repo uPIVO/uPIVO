@@ -2,7 +2,8 @@
 
 Сейчас это один backend. Миграция `0002` добавляет общие таблицы `sources` и
 `feed_items`; `0003` — `users` и `user_sources`. Следующие миграции добавляют
-состояние синхронизации Telegram и Reddit. Автоматическое расписание пока не настроено.
+состояние синхронизации Telegram и Reddit. `0006` — `content_clusters` и
+`cluster_items` (один инфоповод на несколько публикаций). Автоматическое расписание пока не настроено.
 
 | Технология | Зачем Upivo |
 | --- | --- |
@@ -26,7 +27,8 @@
 
 ```text
 collection → raw_payload → normalization → status=normalized
-→ future enrichment / clustering / ranking → status=processed
+→ clustering (exact content_hash + title/body similarity) → content_clusters
+→ future enrichment / ranking → status=processed
 ```
 
 Shared ingestion: enabled `user_sources` → DISTINCT `sources` → sync source once
@@ -58,6 +60,10 @@ original_url / author / published_at, считает `content_hash` и став�
 normalized или failed. `processed` зарезервирован для полного будущего pipeline.
 `raw_payload` не переписывается. CLI:
 `python -m app.processing`.
+`app.clustering` склеивает уже сохранённые `feed_items` в инфоповоды: одинаковый
+`content_hash` — одна история, похожие title и body_text — одна строка
+`content_clusters` плюс `cluster_items`. Публикации не удаляются. Summary не
+требуется. CLI: `python -m app.clustering`.
 Session-файлы Telegram хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
@@ -73,8 +79,8 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
   просмотр сохранённых статей Habr.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и состояния
-  синхронизации Telegram и Reddit.
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
+  `ClusterItem` и состояния синхронизации Telegram и Reddit.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: сбор активных общих источников (`python -m app.services`),
   выборка результата для пользователя (`--user`) и сохранение
@@ -83,6 +89,8 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: нормализация `raw_payload` → поля FeedItem
   (`python -m app.processing`); extractors пока зарезервированы.
+- `clustering`: склейка инфоповодов в `content_clusters` / `cluster_items`
+  (`python -m app.clustering`). Без LLM и без embeddings.
 - `ai`: provider-neutral интерфейс.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
 - `auth`: зарезервировано; схема авторизации не выбрана.
