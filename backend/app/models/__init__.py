@@ -6,6 +6,7 @@ from app.models.reddit_sync_state import RedditSyncState
 from app.models.source import Source
 from app.models.telegram_sync_state import TelegramSyncState
 from app.models.user import User
+from app.models.user_item_score import UserItemScore
 from app.models.user_source import UserSource
 
 __all__ = [
@@ -16,5 +17,6 @@ __all__ = [
     "SourceType",
     "TelegramSyncState",
     "User",
+    "UserItemScore",
     "UserSource",
 ]

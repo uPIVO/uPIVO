@@ -1,7 +1,7 @@
 import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -29,9 +29,26 @@ class ContentUnitPublication(BaseModel):
 class ContentUnitInput(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
+    kind: Literal["feed_item", "cluster"]
     id: int = Field(gt=0, strict=True)
     feed_items: list[ContentUnitPublication] = Field(min_length=1)
     title: str | None = None
+
+    @model_validator(mode="after")
+    def require_target_membership(self) -> "ContentUnitInput":
+        feed_item_ids = [publication.feed_item_id for publication in self.feed_items]
+        if len(feed_item_ids) != len(set(feed_item_ids)):
+            raise ValueError("Публикации единицы контента не должны повторяться.")
+
+        if self.kind == "feed_item":
+            if len(self.feed_items) != 1:
+                raise ValueError("Единица feed_item должна содержать ровно одну публикацию.")
+            if feed_item_ids[0] != self.id:
+                raise ValueError("ID feed_item должен совпадать с ID единственной публикации.")
+        elif len(self.feed_items) < 2:
+            raise ValueError("Кластер должен содержать не менее двух публикаций.")
+
+        return self
 
 
 class SummaryUsage(BaseModel):

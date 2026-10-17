@@ -34,6 +34,7 @@ def _settings(**overrides: Any) -> Settings:
 def _unit(body_text: str = "Публикация о запуске проекта") -> ContentUnitInput:
     return ContentUnitInput.model_validate(
         {
+            "kind": "cluster",
             "id": 41,
             "title": "Запуск проекта",
             "feed_items": [
@@ -96,7 +97,8 @@ class _FakeAdapter:
 def test_content_unit_accepts_single_publication_without_optional_fields() -> None:
     unit = ContentUnitInput.model_validate(
         {
-            "id": 1,
+            "kind": "feed_item",
+            "id": 3,
             "feed_items": [
                 {
                     "feed_item_id": 3,
@@ -112,14 +114,57 @@ def test_content_unit_accepts_single_publication_without_optional_fields() -> No
     assert unit.feed_items[0].extracted_entities is None
 
 
-def test_content_unit_rejects_empty_units_and_blank_required_content() -> None:
+def test_content_unit_requires_explicit_kind_and_enforces_cardinality() -> None:
+    singleton = {
+        "id": 3,
+        "feed_items": [
+            {
+                "feed_item_id": 3,
+                "body_text": "Одиночная публикация",
+                "original_url": "https://example.test/one",
+            }
+        ],
+    }
     with pytest.raises(ValidationError):
-        ContentUnitInput.model_validate({"id": 1, "feed_items": []})
+        ContentUnitInput.model_validate(singleton)
+
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate({**singleton, "kind": "unknown"})
+
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate({**singleton, "kind": "cluster"})
+
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate({**singleton, "kind": "feed_item", "id": 4})
 
     with pytest.raises(ValidationError):
         ContentUnitInput.model_validate(
             {
-                "id": 1,
+                "kind": "feed_item",
+                "id": 3,
+                "feed_items": [singleton["feed_items"][0], singleton["feed_items"][0]],
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate(
+            {
+                "kind": "cluster",
+                "id": 41,
+                "feed_items": [singleton["feed_items"][0], singleton["feed_items"][0]],
+            }
+        )
+
+
+def test_content_unit_rejects_empty_units_and_blank_required_content() -> None:
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate({"kind": "feed_item", "id": 1, "feed_items": []})
+
+    with pytest.raises(ValidationError):
+        ContentUnitInput.model_validate(
+            {
+                "kind": "feed_item",
+                "id": 3,
                 "feed_items": [
                     {
                         "feed_item_id": 3,
@@ -136,6 +181,7 @@ def test_content_unit_requires_a_positive_integer_identifier(unit_id: Any) -> No
     with pytest.raises(ValidationError):
         ContentUnitInput.model_validate(
             {
+                "kind": "feed_item",
                 "id": unit_id,
                 "feed_items": [
                     {
@@ -258,12 +304,12 @@ def test_openrouter_sends_every_publication_as_untrusted_json_and_returns_metada
     assert result.cost_usd == Decimal("0.0009")
 
 
-
 def test_openrouter_accepts_singleton_without_optional_publication_fields() -> None:
     requests: list[httpx.Request] = []
     unit = ContentUnitInput.model_validate(
         {
-            "id": 5,
+            "kind": "feed_item",
+            "id": 21,
             "feed_items": [
                 {
                     "feed_item_id": 21,
@@ -292,7 +338,6 @@ def test_openrouter_accepts_singleton_without_optional_publication_fields() -> N
     assert result.summary == "Сервис запустили в октябре."
     assert result.usage is None
     assert result.cost_usd is None
-
 
 
 def test_adapter_closes_its_http_client_after_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -365,7 +410,6 @@ def test_openrouter_timeout_is_sanitized() -> None:
     assert "частный текст публикации" not in str(exc_info.value)
 
 
-
 def test_openrouter_transport_error_is_sanitized() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("секретный текст ошибки", request=request)
@@ -407,7 +451,6 @@ def test_openrouter_fingerprint_covers_prompt_version(monkeypatch: pytest.Monkey
     monkeypatch.setattr(openrouter, "PROMPT_VERSION", "content-summary-v3")
 
     assert adapter.fingerprint_for(_unit()) != before
-
 
 
 def test_openrouter_fingerprint_covers_prompt_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -485,7 +528,6 @@ def test_openrouter_rejects_malformed_or_empty_responses(response: httpx.Respons
         _run(request_summary())
 
 
-
 @pytest.mark.parametrize(
     ("finish_reason", "top_level_error", "message_error", "accepted"),
     [
@@ -557,7 +599,6 @@ def test_cli_prior_result_round_trip_is_database_free(
     assert second_output["result"]["summary"] == first_output["result"]["summary"]
     assert second_output["result"]["usage"]["total_tokens"] == 53
     assert adapter.calls == 1
-
 
 
 def test_cli_failed_force_preserves_existing_result_file(
