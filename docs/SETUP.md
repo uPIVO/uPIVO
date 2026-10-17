@@ -112,6 +112,9 @@ TELEGRAM_API_ID и TELEGRAM_API_HASH каждый разработчик пол�
 и не выводите в логи.
 LLM_PROVIDER/LLM_API_KEY сейчас пустые; provider не выбран.
 
+Локальная Telegram-сессия и запуск консольного коллектора описаны в
+[Telegram collector](TELEGRAM.md). Ключи и StringSession остаются только в root `.env`.
+
 ## Опциональные workers
 
 ```bash

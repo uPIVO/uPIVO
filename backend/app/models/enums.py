@@ -9,11 +9,13 @@ class SourceType(StrEnum):
     RSS = "rss"
     HABR = "habr"
     YOUTUBE = "youtube"
+    REDDIT = "reddit"
 
 
 class ProcessingStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
+    NORMALIZED = "normalized"
     PROCESSED = "processed"
     FAILED = "failed"
 

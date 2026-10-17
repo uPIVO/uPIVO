@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Identity, Index, String, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Identity, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,7 +9,38 @@ from app.models.enums import SourceType, source_type_enum
 
 class Source(Base):
     __tablename__ = "sources"
-    __table_args__ = (Index("idx_sources_type_external_id", "type", "external_id"),)
+    __table_args__ = (
+        CheckConstraint(
+            "type NOT IN ('youtube', 'habr') OR external_id IS NOT NULL",
+            name="ck_sources_youtube_habr_external_id_required",
+        ),
+        Index("idx_sources_type_external_id", "type", "external_id"),
+        Index(
+            "uq_sources_telegram_external_id",
+            "type",
+            "external_id",
+            unique=True,
+            postgresql_where=text("type = 'telegram'"),
+        ),
+        Index(
+            "uq_sources_reddit_external_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("type = 'reddit'"),
+        ),
+        Index(
+            "uq_sources_youtube_external_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("type = 'youtube'"),
+        ),
+        Index(
+            "uq_sources_habr_external_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("type = 'habr'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     type: Mapped[SourceType] = mapped_column(source_type_enum, nullable=False)

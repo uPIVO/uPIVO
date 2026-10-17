@@ -59,12 +59,8 @@ def _rss_handler(
 
 def test_source_type_includes_youtube_alongside_telegram_and_habr():
     assert SourceType.YOUTUBE.value == "youtube"
-    assert {item.value for item in SourceType} == {
-        "telegram",
-        "website",
-        "rss",
-        "habr",
-        "youtube",
+    assert {"telegram", "website", "rss", "habr", "youtube"} <= {
+        item.value for item in SourceType
     }
 
 
@@ -234,7 +230,7 @@ def test_cli_bad_url_exits_2():
 
 
 def test_cli_network_error_exits_1(monkeypatch):
-    def boom(self, url, *, limit=None):
+    def boom(self, url, *, limit=None, session=None):
         raise SourceFetchError("Network error while reading YouTube")
 
     monkeypatch.setattr(YouTubeConnector, "fetch", boom)
@@ -242,7 +238,7 @@ def test_cli_network_error_exits_1(monkeypatch):
 
 
 def test_cli_dry_run_prints_without_database(capsys, monkeypatch):
-    def fake_fetch(self, url, *, limit=None):
+    def fake_fetch(self, url, *, limit=None, session=None):
         return FetchResult(
             source_name="Demo",
             source_external_id=CHANNEL_ID,
@@ -298,8 +294,20 @@ class _FakeSession:
             self.source.id = 7
 
 
-def test_persist_inserts_source_and_raw_feed_items():
+def test_persist_inserts_source_and_raw_feed_items(monkeypatch):
     session = _FakeSession()
+    def fake_upsert(given_session, fetch, stamp):
+        source = Source(
+            type=SourceType.YOUTUBE,
+            name=fetch.source_name,
+            canonical_url=fetch.canonical_url,
+            external_id=fetch.source_external_id,
+            last_synced_at=stamp,
+        )
+        given_session.add(source)
+        return source
+
+    monkeypatch.setattr("app.connectors.youtube.persist._upsert_source", fake_upsert)
     fetch = FetchResult(
         source_name="Google for Developers",
         source_external_id=CHANNEL_ID,
@@ -362,9 +370,126 @@ def test_persist_updates_existing_video_by_external_id():
             )
         ],
     )
-    stats = persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0))
+    stats = persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0), source=source)
     assert stats.inserted == 0
     assert stats.updated == 1
     assert existing.title == "New title"
     assert existing.body_text == "new body"
     assert session.source.name == "Google for Developers"
+
+
+def _youtube_source():
+    source = Source(
+        type=SourceType.YOUTUBE,
+        name="Google for Developers",
+        canonical_url=f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        external_id=CHANNEL_ID,
+    )
+    source.id = 7
+    return source
+
+
+def test_skips_caption_http_when_transcript_already_stored():
+    caption_calls = []
+    inner = _rss_handler(list_xml=CAPTIONS_LIST, transcript_xml=CAPTIONS_EN)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in {"/api/timedtext", "/watch"}:
+            caption_calls.append(request.url.path)
+        return inner(request)
+
+    existing = FeedItem(
+        source_id=7,
+        external_id="8Xv5BLnXzgI",
+        title="Old title",
+        body_text="already stored transcript",
+        original_url="https://www.youtube.com/watch?v=8Xv5BLnXzgI",
+        raw_payload={
+            "transcript": "already stored transcript",
+            "transcript_lang": "en",
+            "description": "old description",
+        },
+        processing_status=ProcessingStatus.PENDING,
+    )
+    result = YouTubeConnector(client=_client(handler)).fetch(
+        f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        limit=1,
+        session=_FakeSession(source=_youtube_source(), items=[existing]),
+    )
+    assert caption_calls == []
+    item = result.items[0]
+    assert item.body_text == "already stored transcript"
+    assert item.title == "Building a voice-to-print mirror with Gemini"
+    assert item.raw_payload["transcript"] == "already stored transcript"
+    assert item.raw_payload["description"].startswith("Gayatri")
+    assert item.original_url.startswith("https://www.youtube.com/")
+
+
+def test_fetches_captions_when_stored_row_has_no_transcript():
+    caption_calls = []
+    inner = _rss_handler(list_xml=CAPTIONS_LIST, transcript_xml=CAPTIONS_EN)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/timedtext":
+            caption_calls.append(request.url.path)
+        return inner(request)
+
+    existing = FeedItem(
+        source_id=7,
+        external_id="8Xv5BLnXzgI",
+        title="Old title",
+        body_text="Gayatri built a custom journaling device using Gemini.",
+        original_url="https://www.youtube.com/watch?v=8Xv5BLnXzgI",
+        raw_payload={
+            "description": "Gayatri built a custom journaling device using Gemini.",
+            "transcript": None,
+        },
+        processing_status=ProcessingStatus.PENDING,
+    )
+    result = YouTubeConnector(client=_client(handler)).fetch(
+        f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        limit=1,
+        session=_FakeSession(source=_youtube_source(), items=[existing]),
+    )
+    assert caption_calls
+    item = result.items[0]
+    assert item.body_text == "Hello from the transcript.\nThis is caption line two."
+    assert item.raw_payload["transcript"] == item.body_text
+
+
+def test_persist_keeps_existing_transcript_when_incoming_has_none():
+    source = _youtube_source()
+    existing = FeedItem(
+        source_id=7,
+        external_id="abc",
+        title="Old title",
+        body_text="already stored transcript",
+        original_url="https://www.youtube.com/watch?v=abc",
+        raw_payload={
+            "transcript": "already stored transcript",
+            "transcript_lang": "en",
+            "description": "old description",
+        },
+        processing_status=ProcessingStatus.PENDING,
+    )
+    session = _FakeSession(source=source, items=[existing])
+    fetch = FetchResult(
+        source_name="Google for Developers",
+        source_external_id=CHANNEL_ID,
+        canonical_url=f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        items=[
+            RawPublication(
+                external_id="abc",
+                original_url="https://www.youtube.com/watch?v=abc",
+                title="New title",
+                body_text="rss description only",
+                published_at=None,
+                raw_payload={"kind": "youtube_rss_entry", "description": "rss description only"},
+            )
+        ],
+    )
+    persist_fetch(session, fetch, now=datetime(2026, 10, 5, 12, 0, 0), source=source)
+    assert existing.title == "New title"
+    assert existing.body_text == "already stored transcript"
+    assert existing.raw_payload["transcript"] == "already stored transcript"
+    assert existing.raw_payload["description"] == "rss description only"

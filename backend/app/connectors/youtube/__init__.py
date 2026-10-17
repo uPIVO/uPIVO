@@ -42,6 +42,6 @@ def collect_channel(
     up or inserting another YouTube source.
     """
     client = connector or YouTubeConnector()
-    fetch = client.fetch(url, limit=limit)
+    fetch = client.fetch(url, limit=limit, session=session)
     stats = persist_fetch(session, fetch, source=source)
     return fetch, stats

@@ -117,7 +117,7 @@ def map_raw_payload(payload: Any, *, fallback: FieldFallback | None = None) -> N
 def normalize_feed_item(item: FeedItem, *, now: datetime | None = None) -> NormalizeOutcome:
     """Fill unified fields from raw_payload. Leaves raw_payload unchanged.
 
-    Connectors may call this after persist. processing_status becomes processed or failed.
+    Connectors may call this after persist. processing_status becomes normalized or failed.
     extracted_entities / summary / importance_score are not touched.
     """
     stamp = now or datetime.now(UTC).replace(tzinfo=None)
@@ -139,7 +139,7 @@ def normalize_feed_item(item: FeedItem, *, now: datetime | None = None) -> Norma
     item.author = mapped.author
     item.published_at = mapped.published_at
     item.content_hash = mapped.content_hash
-    item.processing_status = ProcessingStatus.PROCESSED
+    item.processing_status = ProcessingStatus.NORMALIZED
     item.updated_at = stamp
     return outcome
 

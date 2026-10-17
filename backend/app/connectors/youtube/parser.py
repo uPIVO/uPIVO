@@ -8,6 +8,7 @@ from typing import Any
 
 import feedparser
 import httpx
+from sqlalchemy.orm import Session
 
 from app.connectors.base import (
     FetchResult,
@@ -16,6 +17,7 @@ from app.connectors.base import (
     SourceFetchError,
 )
 from app.connectors.youtube.captions import fetch_transcript
+from app.connectors.youtube.persist import StoredTranscript, load_existing_transcripts
 from app.connectors.youtube.urls import (
     ParsedChannelUrl,
     canonical_channel_url,
@@ -50,24 +52,31 @@ class YouTubeConnector:
         self._client = client
         self._timeout = timeout
 
-    def fetch(self, canonical_url: str, *, limit: int | None = DEFAULT_LIMIT) -> FetchResult:
+    def fetch(
+        self,
+        canonical_url: str,
+        *,
+        limit: int | None = DEFAULT_LIMIT,
+        session: Session | None = None,
+    ) -> FetchResult:
         parsed = parse_channel_url(canonical_url)
         if limit is not None and limit < 1:
             raise InvalidSourceError("limit must be >= 1")
         if self._client is not None:
-            return self._fetch_with(self._client, parsed, limit)
+            return self._fetch_with(self._client, parsed, limit, session)
         with httpx.Client(
             timeout=self._timeout,
             follow_redirects=True,
             headers=DEFAULT_HEADERS,
         ) as client:
-            return self._fetch_with(client, parsed, limit)
+            return self._fetch_with(client, parsed, limit, session)
 
     def _fetch_with(
         self,
         client: httpx.Client,
         parsed: ParsedChannelUrl,
         limit: int | None,
+        session: Session | None,
     ) -> FetchResult:
         channel_id = parsed.channel_id or self._resolve_channel_id(client, parsed.lookup_url)
         feed = self._download_rss(client, rss_url(channel_id))
@@ -79,7 +88,12 @@ class YouTubeConnector:
         ]
         if limit is not None:
             items = items[:limit]
-        items = [_with_transcript(client, item) for item in items]
+        stored = (
+            load_existing_transcripts(session, channel_id, [item.external_id for item in items])
+            if session is not None
+            else {}
+        )
+        items = [_with_transcript(client, item, stored.get(item.external_id)) for item in items]
         return FetchResult(
             source_name=source_name,
             source_external_id=channel_id,
@@ -155,7 +169,27 @@ def _entry_to_publication(entry: Any, channel_id: str) -> RawPublication | None:
     )
 
 
-def _with_transcript(client: httpx.Client, item: RawPublication) -> RawPublication:
+def _with_transcript(
+    client: httpx.Client,
+    item: RawPublication,
+    stored: StoredTranscript | None = None,
+) -> RawPublication:
+    if stored is not None:
+        payload = dict(item.raw_payload)
+        payload["transcript"] = stored.text
+        if stored.lang:
+            payload["transcript_lang"] = stored.lang
+        if stored.kind:
+            payload["transcript_kind"] = stored.kind
+        return RawPublication(
+            external_id=item.external_id,
+            original_url=item.original_url,
+            title=item.title,
+            body_text=stored.text,
+            published_at=item.published_at,
+            author=item.author,
+            raw_payload=payload,
+        )
     caption = fetch_transcript(client, item.external_id)
     payload = dict(item.raw_payload)
     if caption is None:

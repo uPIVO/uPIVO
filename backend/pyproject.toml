@@ -10,7 +10,11 @@ dependencies = [
  "beautifulsoup4>=4.12,<5", "feedparser>=6,<7", "redis>=5,<8", "celery>=5.4,<6",
 ]
 [dependency-groups]
-dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+dev = [
+    "pytest>=8,<10",
+    "qrcode>=8,<9",
+    "ruff>=0.9,<1",
+]
 [tool.uv]
 package = false
 [tool.pytest.ini_options]

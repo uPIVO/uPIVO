@@ -1,9 +1,9 @@
 # Архитектура Upivo
 
-Сейчас это один backend, без продуктовых HTTP-endpoint. Миграция `0002` добавляет
-таблицы `sources` и `feed_items` для сырого сбора; `0003` — `users` и `user_sources`
-(какие источники включил конкретный пользователь). Остальные этапы обработки —
-план для отдельных задач, а не уже реализованная функциональность.
+Сейчас это один backend. Миграция `0002` добавляет общие таблицы `sources` и
+`feed_items`; `0003` — `users` и `user_sources`. Следующие миграции добавляют
+состояние синхронизации Telegram и Reddit. `0006` — `content_clusters` и
+`cluster_items` (один инфоповод на несколько публикаций). Автоматическое расписание пока не настроено.
 
 | Технология | Зачем Upivo |
 | --- | --- |
@@ -11,7 +11,7 @@
 | PostgreSQL | Основное долговременное хранилище публикаций и будущих настроек |
 | SQLAlchemy 2 | Python-модели, SQL-запросы, соединения и sessions |
 | Alembic | Последовательные версии структуры базы данных |
-| Telethon | Python-клиент Telegram API для будущего сбора публикаций |
+| Telethon | Python-клиент Telegram API для ручного консольного сбора публикаций |
 | httpx | Скачивает страницу или обращается к внешнему HTTP API |
 | trafilatura | Извлекает основной текст статьи, убирая меню/рекламу/шум |
 | BeautifulSoup | Точечный разбор HTML там, где trafilatura недостаточно |
@@ -23,29 +23,47 @@
 | Docker/Compose | Единое воспроизводимое окружение API, БД и Redis |
 | Python logging | Timestamp, level, logger name, message; LOG_LEVEL через env |
 
-## Будущий pipeline
+## Pipeline публикаций
 
 ```text
-external source → collection → raw_payload → normalization → FeedItem
-→ cheap entity extraction → extracted_entities → AI processing
-→ clustering / ranking → feed / digest
+collection → raw_payload → normalization → status=normalized
+→ clustering (exact content_hash + title/body similarity) → content_clusters
+→ future enrichment / ranking → status=processed
 ```
 
-Будущая модель FeedItem предусматривает `raw_payload JSONB` — оригинальные данные
-источника; `extracted_entities JSONB` — hashtags, mentions, URLs, tools/products
-и другие быстро извлечённые сущности без LLM. Формат и полную модель согласует команда.
+Shared ingestion: enabled `user_sources` → DISTINCT `sources` → sync source once
+→ shared `feed_items`. `python -m app.services` запускает этот сценарий; один
+источник с несколькими подписчиками опрашивается один раз за запуск.
 
-Telegram API → Telethon → connectors/telegram → будущий FeedItem.
+User layer: `User` → `UserSource` → later relevance / ranking / feed / digest.
+Персональные действия не создают копии публикаций в `feed_items`.
+
+Общая модель FeedItem хранит `raw_payload JSONB` — исходные данные источника;
+`extracted_entities JSONB` предназначено для hashtags, mentions, URLs, tools/products
+и других быстро извлечённых сущностей без LLM. Извлечение сущностей остаётся отдельной задачей.
+
+Telegram API → Telethon → connectors/telegram → processing/telegram →
+services/telegram → FeedItem и курсор PostgreSQL.
+Reddit → Arctic Shift API → connectors/reddit → services/reddit → FeedItem и
+временной курсор PostgreSQL.
 YouTube → канал RSS (feedparser, без Data API) и публичные субтитры (timedtext) →
 сырые строки `feed_items` (`raw_payload`, title, url, published_at, body_text).
 Это сбор сырья, не дайджест.
-`python -m app.services --user` собирает только источники из `user_sources`
-этого пользователя; запись всё равно в общие `sources` / `feed_items`.
+`python -m app.services --user` — dev/CLI запуск: синхронизирует только включённые
+источники указанного пользователя через общий dispatcher. Готовые результаты
+общего запуска можно передать нескольким пользователям без повторного сбора.
+Будущий Feed/Digest HTTP API читает сохранённые `feed_items` и не запускает collection.
+YouTube и Habr идентифицируются уникальным `external_id` в рамках своего типа.
 Connector отвечает за доступ к источнику.
 `app.processing` читает pending `feed_items`, мапит `raw_payload` на title / body_text /
 original_url / author / published_at, считает `content_hash` и ставит
-processed или failed. `raw_payload` не переписывается. CLI:
+normalized или failed. `processed` зарезервирован для полного будущего pipeline.
+`raw_payload` не переписывается. CLI:
 `python -m app.processing`.
+`app.clustering` склеивает уже сохранённые `feed_items` в инфоповоды: одинаковый
+`content_hash` — одна история, похожие title и body_text — одна строка
+`content_clusters` плюс `cluster_items`. Публикации не удаляются. Summary не
+требуется. CLI: `python -m app.clustering`.
 Session-файлы Telegram хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
@@ -57,17 +75,22 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 
 ## Границы кода
 
-- `api`: HTTP-маршруты; сейчас только `/health` и `/health/db` (SELECT 1).
+- `api`: HTTP-маршруты: `/health`, `/health/db`, предпросмотр, сохранение и
+  просмотр сохранённых статей Habr.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и enum `source_type` (включая youtube).
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
+  `ClusterItem` и состояния синхронизации Telegram и Reddit.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
-- `services`: сбор под пользователя (`python -m app.services --user`);
-  `sources` общие, `user_sources` — какие из них включены у этого пользователя.
-- `connectors`: доступ к Telegram/web/RSS; YouTube — RSS канала, CLI
+- `services`: сбор активных общих источников (`python -m app.services`),
+  выборка результата для пользователя (`--user`) и сохранение
+  Telegram/Reddit с курсорами; `sources` общие, `user_sources` — пользовательские настройки.
+- `connectors`: доступ к Telegram/web/RSS/Reddit; YouTube — RSS канала, CLI
   `python -m app.connectors.youtube`. Общий протокол — `SourceConnector`.
 - `processing`: нормализация `raw_payload` → поля FeedItem
   (`python -m app.processing`); extractors пока зарезервированы.
+- `clustering`: склейка инфоповодов в `content_clusters` / `cluster_items`
+  (`python -m app.clustering`). Без LLM и без embeddings.
 - `ai`: provider-neutral интерфейс.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
 - `auth`: зарезервировано; схема авторизации не выбрана.
@@ -75,9 +98,9 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 API не подключается к БД при импорте/старте. `/health` проверяет процесс,
 `/health/db` проверяет БД и возвращает 503 без деталей ошибок при недоступности.
 Compose запускает миграции отдельно перед API; приложение не создаёт таблицы само.
-Session закрывается dependency; commit/rollback будущих записей выполняет код сценария.
+Session закрывается dependency; сценарии сбора выполняют commit/rollback своих записей.
 Нет автоматического commit после HTTP-запроса.
 
 Не вводим Firebase/OAuth/JWT до решения команды. Frontend Next.js + TypeScript
-начнётся в следующем модуле. Production hosting, auth, FeedItem и AI provider
+начнётся в следующем модуле. Production hosting, auth, продуктовые endpoint и AI provider
 остаются решениями техлида. Существующая инфраструктура предназначена для разработки.
