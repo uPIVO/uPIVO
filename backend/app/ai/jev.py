@@ -34,6 +34,17 @@ RELEVANCE_INSTRUCTIONS = (
 )
 
 
+def _validated_typesafe_api_key(api_key: Any) -> str:
+    value = api_key.get_secret_value().strip()
+    if (
+        not value
+        or not value.isascii()
+        or any(not character.isprintable() or character.isspace() for character in value)
+    ):
+        raise LLMError("Не задан или некорректен API-ключ TypeSafe.")
+    return value
+
+
 class JevRelevanceAdapter:
     def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
         base_url = settings.typesafe_base_url.strip()
@@ -93,15 +104,11 @@ class JevRelevanceAdapter:
         encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"v1:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
-    async def score_relevance(self, value: RelevanceInput) -> RelevanceResult:
-        api_key = self._api_key.get_secret_value().strip()
-        if (
-            not api_key
-            or not api_key.isascii()
-            or any(not character.isprintable() or character.isspace() for character in api_key)
-        ):
-            raise LLMError("Не задан или некорректен API-ключ TypeSafe.")
+    def validate_configuration(self) -> None:
+        _validated_typesafe_api_key(self._api_key)
 
+    async def score_relevance(self, value: RelevanceInput) -> RelevanceResult:
+        api_key = _validated_typesafe_api_key(self._api_key)
         if self._client is not None:
             return await self._request_relevance(self._client, value, api_key)
 
@@ -264,15 +271,11 @@ class JevImportanceAdapter:
         encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"v1:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
-    async def score_importance(self, value: ImportanceInput) -> ImportanceComponents:
-        api_key = self._api_key.get_secret_value().strip()
-        if (
-            not api_key
-            or not api_key.isascii()
-            or any(not character.isprintable() or character.isspace() for character in api_key)
-        ):
-            raise LLMError("Не задан или некорректен API-ключ TypeSafe.")
+    def validate_configuration(self) -> None:
+        _validated_typesafe_api_key(self._api_key)
 
+    async def score_importance(self, value: ImportanceInput) -> ImportanceComponents:
+        api_key = _validated_typesafe_api_key(self._api_key)
         if self._client is not None:
             return await self._request_importance(self._client, value, api_key)
 

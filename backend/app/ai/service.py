@@ -19,6 +19,26 @@ class SummarizationService:
     def __init__(self, adapter: LLMAdapter) -> None:
         self._adapter = adapter
 
+    def validate_configuration(self) -> None:
+        self._adapter.validate_configuration()
+
+    def requires_provider_call(
+        self,
+        unit: ContentUnitInput | Mapping[str, Any],
+        *,
+        prior_result: SummaryResult | Mapping[str, Any] | None = None,
+        force: bool = False,
+    ) -> bool:
+        if force or prior_result is None:
+            return True
+        try:
+            content_unit = ContentUnitInput.model_validate(unit)
+            previous = SummaryResult.model_validate(prior_result)
+            fingerprint = self._adapter.fingerprint_for(content_unit)
+        except Exception:
+            return True
+        return previous.fingerprint != fingerprint
+
     async def summarize(
         self,
         unit: ContentUnitInput | Mapping[str, Any],
@@ -71,6 +91,9 @@ class SummarizationService:
 class RelevanceService:
     def __init__(self, adapter: RelevanceAdapter) -> None:
         self._adapter = adapter
+
+    def validate_configuration(self) -> None:
+        self._adapter.validate_configuration()
 
     async def score_relevance(
         self,

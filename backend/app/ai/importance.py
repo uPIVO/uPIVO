@@ -90,6 +90,9 @@ class ImportanceService:
     def __init__(self, adapter: ImportanceAdapter) -> None:
         self._adapter = adapter
 
+    def validate_configuration(self) -> None:
+        self._adapter.validate_configuration()
+
     async def score_importance(
         self,
         value: ImportanceInput | Mapping[str, Any],

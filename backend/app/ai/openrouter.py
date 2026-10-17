@@ -104,9 +104,12 @@ class OpenRouterAdapter:
         encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"v1:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
-    async def summarize(self, unit: ContentUnitInput) -> SummaryResult:
+    def validate_configuration(self) -> None:
         if not self._api_key.get_secret_value().strip():
             raise LLMError("Не задан API-ключ OpenRouter.")
+
+    async def summarize(self, unit: ContentUnitInput) -> SummaryResult:
+        self.validate_configuration()
 
         if self._client is not None:
             return await self._request_summary(self._client, unit)
