@@ -20,6 +20,7 @@ from app.ai.analysis_metadata import (
     SummaryResultHistory,
     UserItemScoreAIMetadata,
     content_input_fingerprint,
+    summary_lineage_fingerprint,
 )
 from app.ai.dto import (
     ContentUnitInput,
@@ -117,13 +118,16 @@ class FeedItemAnalysisRepository:
         *,
         user_id: int,
         feed_item_id: int,
-        summary_fingerprint: str,
+        expected_summary_lineage_fingerprint: str,
         interests_fingerprint: str,
     ) -> RelevanceResult | None:
         snapshot = self.load_snapshot(session, kind="feed_item", unit_id=feed_item_id)
         if snapshot is None or snapshot.summary_result is None:
             return None
-        if snapshot.summary_result.fingerprint != summary_fingerprint:
+        if (
+            summary_lineage_fingerprint(snapshot.summary_result)
+            != expected_summary_lineage_fingerprint
+        ):
             return None
 
         row = session.scalar(
@@ -140,7 +144,7 @@ class FeedItemAnalysisRepository:
             or last_good.status != "current"
             or last_good.input_fingerprint != last_good.result.fingerprint
             or last_good.source_input_fingerprint != snapshot.input_fingerprint
-            or last_good.summary_fingerprint != summary_fingerprint
+            or last_good.summary_lineage_fingerprint != expected_summary_lineage_fingerprint
             or last_good.interests_fingerprint != interests_fingerprint
             or row.relevance_score != last_good.result.relevance
         ):
@@ -193,7 +197,8 @@ class FeedItemAnalysisRepository:
                 status="current",
                 input_fingerprint=loaded.input_fingerprint,
                 result=validated_result,
-            )
+            ),
+            stale_candidate=metadata.summary.stale_candidate,
         )
         loaded.row.summary = validated_result.summary
         self._write_feed_metadata(loaded.row, metadata.model_copy(update={"summary": summary}))
@@ -206,7 +211,7 @@ class FeedItemAnalysisRepository:
         *,
         feed_item_id: int,
         expected_input_fingerprint: str,
-        summary_fingerprint: str,
+        expected_summary_lineage_fingerprint: str,
         result: ImportanceResult,
     ) -> SaveDisposition:
         validated_result = ImportanceResult.model_validate(result)
@@ -218,7 +223,7 @@ class FeedItemAnalysisRepository:
         is_current = (
             loaded.input_fingerprint == expected_input_fingerprint
             and current_summary is not None
-            and current_summary.fingerprint == summary_fingerprint
+            and summary_lineage_fingerprint(current_summary) == expected_summary_lineage_fingerprint
         )
         if not is_current:
             metadata, _ = self._mark_inconsistent_outputs(session, loaded)
@@ -226,7 +231,7 @@ class FeedItemAnalysisRepository:
                 update={
                     "stale_candidate": StaleImportanceCandidate(
                         input_fingerprint=expected_input_fingerprint,
-                        summary_fingerprint=summary_fingerprint,
+                        summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
                         result=validated_result,
                     )
                 }
@@ -241,9 +246,10 @@ class FeedItemAnalysisRepository:
             last_good=StoredImportanceResult(
                 status="current",
                 input_fingerprint=expected_input_fingerprint,
-                summary_fingerprint=summary_fingerprint,
+                summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
                 result=validated_result,
-            )
+            ),
+            stale_candidate=loaded.metadata.importance.stale_candidate,
         )
         loaded.row.importance_score = validated_result.total_score
         metadata = loaded.metadata.model_copy(update={"importance": importance})
@@ -258,7 +264,7 @@ class FeedItemAnalysisRepository:
         user_id: int,
         feed_item_id: int,
         source_input_fingerprint: str,
-        summary_fingerprint: str,
+        expected_summary_lineage_fingerprint: str,
         interests_fingerprint: str,
         result: RelevanceResult,
     ) -> SaveDisposition:
@@ -271,7 +277,7 @@ class FeedItemAnalysisRepository:
         is_current = (
             loaded.input_fingerprint == source_input_fingerprint
             and current_summary is not None
-            and current_summary.fingerprint == summary_fingerprint
+            and summary_lineage_fingerprint(current_summary) == expected_summary_lineage_fingerprint
         )
         row = session.scalar(
             select(UserItemScore)
@@ -291,8 +297,10 @@ class FeedItemAnalysisRepository:
                 row,
                 metadata.relevance,
                 current_input_fingerprint=loaded.input_fingerprint,
-                current_summary_fingerprint=(
-                    current_summary.fingerprint if current_summary is not None else None
+                current_summary_lineage_fingerprint=(
+                    summary_lineage_fingerprint(current_summary)
+                    if current_summary is not None
+                    else None
                 ),
                 requested_interests_fingerprint=interests_fingerprint,
             )
@@ -301,7 +309,7 @@ class FeedItemAnalysisRepository:
                     "stale_candidate": StaleRelevanceCandidate(
                         input_fingerprint=validated_result.fingerprint,
                         source_input_fingerprint=source_input_fingerprint,
-                        summary_fingerprint=summary_fingerprint,
+                        summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
                         interests_fingerprint=interests_fingerprint,
                         result=validated_result,
                     )
@@ -316,10 +324,11 @@ class FeedItemAnalysisRepository:
                 status="current",
                 input_fingerprint=validated_result.fingerprint,
                 source_input_fingerprint=source_input_fingerprint,
-                summary_fingerprint=summary_fingerprint,
+                summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
                 interests_fingerprint=interests_fingerprint,
                 result=validated_result,
-            )
+            ),
+            stale_candidate=metadata.relevance.stale_candidate,
         )
         row.relevance_score = validated_result.relevance
         row.rank_score = None
@@ -410,7 +419,7 @@ class FeedItemAnalysisRepository:
             or last_good is None
             or last_good.status != "current"
             or last_good.input_fingerprint != loaded.input_fingerprint
-            or last_good.summary_fingerprint != summary.fingerprint
+            or last_good.summary_lineage_fingerprint != summary_lineage_fingerprint(summary)
             or loaded.row.importance_score != last_good.result.total_score
         ):
             return None
@@ -504,7 +513,7 @@ class FeedItemAnalysisRepository:
         history: RelevanceResultHistory,
         *,
         current_input_fingerprint: str,
-        current_summary_fingerprint: str | None,
+        current_summary_lineage_fingerprint: str | None,
         requested_interests_fingerprint: str,
     ) -> RelevanceResultHistory:
         last_good = history.last_good
@@ -517,7 +526,7 @@ class FeedItemAnalysisRepository:
         if (
             last_good.input_fingerprint != last_good.result.fingerprint
             or last_good.source_input_fingerprint != current_input_fingerprint
-            or last_good.summary_fingerprint != current_summary_fingerprint
+            or last_good.summary_lineage_fingerprint != current_summary_lineage_fingerprint
             or last_good.interests_fingerprint != requested_interests_fingerprint
         ):
             row.relevance_score = None

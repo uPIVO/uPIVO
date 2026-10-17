@@ -10,6 +10,7 @@ from app.ai.dto import ContentUnitInput, ImportanceResult, RelevanceResult, Summ
 
 _INPUT_FINGERPRINT = r"^input-v1:[0-9a-f]{64}$"
 _INTERESTS_FINGERPRINT = r"^interests-v1:[0-9a-f]{64}$"
+_SUMMARY_LINEAGE_FINGERPRINT = r"^summary-lineage-v1:[0-9a-f]{64}$"
 
 
 class StoredSummaryResult(BaseModel):
@@ -40,7 +41,7 @@ class StoredImportanceResult(BaseModel):
 
     status: Literal["current", "stale"]
     input_fingerprint: str = Field(pattern=_INPUT_FINGERPRINT)
-    summary_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
+    summary_lineage_fingerprint: str = Field(pattern=_SUMMARY_LINEAGE_FINGERPRINT)
     result: ImportanceResult
 
 
@@ -49,7 +50,7 @@ class StaleImportanceCandidate(BaseModel):
 
     status: Literal["stale"] = "stale"
     input_fingerprint: str = Field(pattern=_INPUT_FINGERPRINT)
-    summary_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
+    summary_lineage_fingerprint: str = Field(pattern=_SUMMARY_LINEAGE_FINGERPRINT)
     result: ImportanceResult
 
 
@@ -63,7 +64,7 @@ class ImportanceResultHistory(BaseModel):
 class FeedItemAIMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     summary: SummaryResultHistory = Field(default_factory=SummaryResultHistory)
     importance: ImportanceResultHistory = Field(default_factory=ImportanceResultHistory)
 
@@ -74,7 +75,7 @@ class StoredRelevanceResult(BaseModel):
     status: Literal["current", "stale"]
     input_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
     source_input_fingerprint: str = Field(pattern=_INPUT_FINGERPRINT)
-    summary_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
+    summary_lineage_fingerprint: str = Field(pattern=_SUMMARY_LINEAGE_FINGERPRINT)
     interests_fingerprint: str = Field(pattern=_INTERESTS_FINGERPRINT)
     result: RelevanceResult
 
@@ -85,7 +86,7 @@ class StaleRelevanceCandidate(BaseModel):
     status: Literal["stale"] = "stale"
     input_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
     source_input_fingerprint: str = Field(pattern=_INPUT_FINGERPRINT)
-    summary_fingerprint: str = Field(pattern=r"^v1:[0-9a-f]{64}$")
+    summary_lineage_fingerprint: str = Field(pattern=_SUMMARY_LINEAGE_FINGERPRINT)
     interests_fingerprint: str = Field(pattern=_INTERESTS_FINGERPRINT)
     result: RelevanceResult
 
@@ -100,8 +101,19 @@ class RelevanceResultHistory(BaseModel):
 class UserItemScoreAIMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     relevance: RelevanceResultHistory = Field(default_factory=RelevanceResultHistory)
+
+
+def summary_lineage_fingerprint(result: SummaryResult) -> str:
+    encoded = json.dumps(
+        {"generation_fingerprint": result.fingerprint, "summary_text": result.summary},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"summary-lineage-v1:{digest}"
 
 
 def content_input_fingerprint(unit: ContentUnitInput) -> str:

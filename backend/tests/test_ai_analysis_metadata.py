@@ -17,6 +17,7 @@ from app.ai.analysis_metadata import (
     UserItemScoreAIMetadata,
     content_input_fingerprint,
     interests_input_fingerprint,
+    summary_lineage_fingerprint,
 )
 from app.ai.dto import (
     ContentUnitInput,
@@ -90,6 +91,20 @@ def test_content_input_fingerprint_is_stable_and_includes_source_name() -> None:
     assert first != changed_source
 
 
+def test_summary_lineage_fingerprint_covers_generation_and_exact_summary_text() -> None:
+    original = _summary_result()
+    same_result = _summary_result()
+    different_text = _summary_result("Короткая выжимка с изменённым текстом")
+    different_generation = original.model_copy(update={"fingerprint": f"v1:{'d' * 64}"})
+
+    lineage = summary_lineage_fingerprint(original)
+
+    assert lineage.startswith("summary-lineage-v1:")
+    assert summary_lineage_fingerprint(same_result) == lineage
+    assert summary_lineage_fingerprint(different_text) != lineage
+    assert summary_lineage_fingerprint(different_generation) != lineage
+
+
 def test_feed_item_metadata_round_trips_last_good_and_one_stale_candidate() -> None:
     last_good = StoredSummaryResult(
         status="stale",
@@ -103,12 +118,12 @@ def test_feed_item_metadata_round_trips_last_good_and_one_stale_candidate() -> N
     importance = StoredImportanceResult(
         status="stale",
         input_fingerprint=f"input-v1:{'1' * 64}",
-        summary_fingerprint=f"v1:{'a' * 64}",
+        summary_lineage_fingerprint=f"summary-lineage-v1:{'a' * 64}",
         result=_importance_result(),
     )
     stale_importance = StaleImportanceCandidate(
         input_fingerprint=f"input-v1:{'2' * 64}",
-        summary_fingerprint=f"v1:{'d' * 64}",
+        summary_lineage_fingerprint=f"summary-lineage-v1:{'d' * 64}",
         result=_importance_result(),
     )
     metadata = FeedItemAIMetadata(
@@ -120,12 +135,15 @@ def test_feed_item_metadata_round_trips_last_good_and_one_stale_candidate() -> N
     restored = FeedItemAIMetadata.model_validate(stored)
 
     assert restored == metadata
+    assert restored.schema_version == 2
     assert restored.summary.last_good.result.usage.total_tokens == 16
     assert restored.summary.last_good.result.cost_usd == Decimal("0.0012")
     assert restored.summary.stale_candidate.status == "stale"
     assert restored.importance.last_good.result.total_score == 3.0
     assert "api_key" not in str(stored).lower()
     assert "interests" not in str(stored).lower()
+    with pytest.raises(ValidationError):
+        FeedItemAIMetadata.model_validate({**stored, "schema_version": 1})
 
 
 def test_relevance_metadata_keeps_only_fingerprints_not_raw_interests() -> None:
@@ -135,14 +153,14 @@ def test_relevance_metadata_keeps_only_fingerprints_not_raw_interests() -> None:
         status="current",
         input_fingerprint=_relevance_result().fingerprint,
         source_input_fingerprint=f"input-v1:{'1' * 64}",
-        summary_fingerprint=f"v1:{'a' * 64}",
+        summary_lineage_fingerprint=f"summary-lineage-v1:{'a' * 64}",
         interests_fingerprint=interests_fingerprint,
         result=_relevance_result(),
     )
     stale_candidate = StaleRelevanceCandidate(
         input_fingerprint=f"v1:{'e' * 64}",
         source_input_fingerprint=f"input-v1:{'2' * 64}",
-        summary_fingerprint=f"v1:{'d' * 64}",
+        summary_lineage_fingerprint=f"summary-lineage-v1:{'d' * 64}",
         interests_fingerprint=interests_fingerprint,
         result=_relevance_result(),
     )
@@ -154,7 +172,10 @@ def test_relevance_metadata_keeps_only_fingerprints_not_raw_interests() -> None:
     restored = UserItemScoreAIMetadata.model_validate(stored)
 
     assert restored == metadata
+    assert restored.schema_version == 2
     assert interests_fingerprint.startswith("interests-v1:")
     assert all(value not in str(stored) for value in interests)
     with pytest.raises(ValidationError):
         UserItemScoreAIMetadata.model_validate({**stored, "interests": interests})
+    with pytest.raises(ValidationError):
+        UserItemScoreAIMetadata.model_validate({**stored, "schema_version": 1})

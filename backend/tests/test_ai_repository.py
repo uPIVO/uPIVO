@@ -5,7 +5,11 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 
-from app.ai.analysis_metadata import content_input_fingerprint, interests_input_fingerprint
+from app.ai.analysis_metadata import (
+    content_input_fingerprint,
+    interests_input_fingerprint,
+    summary_lineage_fingerprint,
+)
 from app.ai.dto import (
     ImportanceResult,
     ImportanceWeights,
@@ -270,7 +274,7 @@ def test_new_summary_invalidates_importance_and_user_score_projections() -> None
             session,
             feed_item_id=row.id,
             expected_input_fingerprint=snapshot.input_fingerprint,
-            summary_fingerprint=summary.fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
             result=_importance("b"),
         )
         is SaveDisposition.CURRENT
@@ -281,7 +285,7 @@ def test_new_summary_invalidates_importance_and_user_score_projections() -> None
             user_id=9,
             feed_item_id=row.id,
             source_input_fingerprint=snapshot.input_fingerprint,
-            summary_fingerprint=summary.fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
             interests_fingerprint=interests_input_fingerprint(["тема"]),
             result=_relevance("c"),
         )
@@ -337,7 +341,7 @@ def test_relevance_prior_requires_current_summary_and_matching_interest_fingerpr
             user_id=9,
             feed_item_id=row.id,
             source_input_fingerprint=snapshot.input_fingerprint,
-            summary_fingerprint=summary.fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
             interests_fingerprint=interests_fingerprint,
             result=relevance,
         )
@@ -349,7 +353,7 @@ def test_relevance_prior_requires_current_summary_and_matching_interest_fingerpr
             session,
             user_id=9,
             feed_item_id=row.id,
-            summary_fingerprint=summary.fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
             interests_fingerprint=interests_fingerprint,
         )
         == relevance
@@ -359,11 +363,258 @@ def test_relevance_prior_requires_current_summary_and_matching_interest_fingerpr
             session,
             user_id=9,
             feed_item_id=row.id,
-            summary_fingerprint=summary.fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
             interests_fingerprint=interests_input_fingerprint(["другая тема"]),
         )
         is None
     )
+
+
+def test_same_generation_fingerprint_rejects_scores_for_replaced_summary_text() -> None:
+    row = _feed_item()
+    session = _Session(row)
+    repository = FeedItemAnalysisRepository()
+    snapshot = repository.load_snapshot(session, kind="feed_item", unit_id=row.id)
+    assert snapshot is not None
+    summary_a = _summary("Выжимка A", "a")
+    assert (
+        repository.save_summary(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            result=summary_a,
+        )
+        is SaveDisposition.CURRENT
+    )
+    importance_a = _importance("b")
+    relevance_a = _relevance("c", value=0.2)
+    interests_fingerprint = interests_input_fingerprint(["тема"])
+    assert (
+        repository.save_importance(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_a),
+            result=importance_a,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_relevance(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            source_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_a),
+            interests_fingerprint=interests_fingerprint,
+            result=relevance_a,
+        )
+        is SaveDisposition.CURRENT
+    )
+
+    summary_b = _summary("Выжимка B", "a")
+    assert summary_b.fingerprint == summary_a.fingerprint
+    assert (
+        repository.save_summary(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            result=summary_b,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert row.summary == summary_b.summary
+    assert row.importance_score is None
+    assert session.score is not None and session.score.relevance_score is None
+
+    old_importance = repository.save_importance(
+        session,
+        feed_item_id=row.id,
+        expected_input_fingerprint=snapshot.input_fingerprint,
+        expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_a),
+        result=importance_a,
+    )
+    old_relevance = repository.save_relevance(
+        session,
+        user_id=9,
+        feed_item_id=row.id,
+        source_input_fingerprint=snapshot.input_fingerprint,
+        expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_a),
+        interests_fingerprint=interests_fingerprint,
+        result=relevance_a,
+    )
+    assert (old_importance, old_relevance) == (
+        SaveDisposition.STALE_CANDIDATE,
+        SaveDisposition.STALE_CANDIDATE,
+    )
+    assert row.importance_score is None
+    assert session.score.relevance_score is None
+
+    importance_b = _importance("d")
+    relevance_b = _relevance("e", value=0.9)
+    assert (
+        repository.save_importance(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_b),
+            result=importance_b,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_relevance(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            source_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_b),
+            interests_fingerprint=interests_fingerprint,
+            result=relevance_b,
+        )
+        is SaveDisposition.CURRENT
+    )
+    current = repository.load_snapshot(session, kind="feed_item", unit_id=row.id)
+    assert current is not None and current.summary_result == summary_b
+    assert current.importance_result == importance_b
+    assert row.importance_score == importance_b.total_score
+    assert session.score.relevance_score == relevance_b.relevance
+    assert (
+        repository.get_relevance_prior(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_a),
+            interests_fingerprint=interests_fingerprint,
+        )
+        is None
+    )
+    assert (
+        repository.get_relevance_prior(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary_b),
+            interests_fingerprint=interests_fingerprint,
+        )
+        == relevance_b
+    )
+
+
+def test_successful_result_saves_preserve_one_stale_candidate_per_result_kind() -> None:
+    row = _feed_item()
+    session = _Session(row)
+    repository = FeedItemAnalysisRepository()
+    snapshot = repository.load_snapshot(session, kind="feed_item", unit_id=row.id)
+    assert snapshot is not None
+    summary = _summary("Текущая выжимка", "a")
+    importance = _importance("b")
+    relevance = _relevance("c")
+    interests_fingerprint = interests_input_fingerprint(["тема"])
+    assert (
+        repository.save_summary(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            result=summary,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_importance(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            result=importance,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_relevance(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            source_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            interests_fingerprint=interests_fingerprint,
+            result=relevance,
+        )
+        is SaveDisposition.CURRENT
+    )
+
+    stale_summary = _summary("Кандидат выжимки", "d")
+    stale_importance = _importance("e")
+    stale_relevance = _relevance("f")
+    assert (
+        repository.save_summary(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=f"input-v1:{'0' * 64}",
+            result=stale_summary,
+        )
+        is SaveDisposition.STALE_CANDIDATE
+    )
+    assert (
+        repository.save_importance(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=f"summary-lineage-v1:{'0' * 64}",
+            result=stale_importance,
+        )
+        is SaveDisposition.STALE_CANDIDATE
+    )
+    assert (
+        repository.save_relevance(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            source_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=f"summary-lineage-v1:{'0' * 64}",
+            interests_fingerprint=interests_fingerprint,
+            result=stale_relevance,
+        )
+        is SaveDisposition.STALE_CANDIDATE
+    )
+
+    assert (
+        repository.save_summary(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            result=summary,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_importance(
+            session,
+            feed_item_id=row.id,
+            expected_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            result=importance,
+        )
+        is SaveDisposition.CURRENT
+    )
+    assert (
+        repository.save_relevance(
+            session,
+            user_id=9,
+            feed_item_id=row.id,
+            source_input_fingerprint=snapshot.input_fingerprint,
+            expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            interests_fingerprint=interests_fingerprint,
+            result=relevance,
+        )
+        is SaveDisposition.CURRENT
+    )
+
+    feed_metadata = FeedItemAnalysisRepository._read_feed_metadata(row)
+    score_metadata = FeedItemAnalysisRepository._read_score_metadata(session.score)
+    assert feed_metadata.summary.stale_candidate.result == stale_summary
+    assert feed_metadata.importance.stale_candidate.result == stale_importance
+    assert score_metadata.relevance.stale_candidate.result == stale_relevance
 
 
 def test_repository_does_not_create_empty_analysis_metadata_for_unprocessed_item() -> None:
