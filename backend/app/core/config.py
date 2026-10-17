@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = "@preset/deep-seek-v4-flash-via-direct-deep-seek-provider"
     llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    typesafe_api_key: SecretStr = SecretStr("")
+    typesafe_base_url: str = "https://api.typesafe.ai"
+    typesafe_model: str = "jev-1.14.0"
+    typesafe_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     log_level: str = "INFO"
 
 
