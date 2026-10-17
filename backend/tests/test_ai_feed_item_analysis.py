@@ -225,10 +225,18 @@ class _SummaryService:
 
 
 class _ImportanceService:
-    def __init__(self, state: _State, *, fail: bool = False, fail_config: bool = False) -> None:
+    def __init__(
+        self,
+        state: _State,
+        *,
+        fail: bool = False,
+        fail_config: bool = False,
+        mutate_calls: set[int] | None = None,
+    ) -> None:
         self.state = state
         self.fail = fail
         self.fail_config = fail_config
+        self.mutate_calls = mutate_calls or set()
         self.calls: list[tuple[str, ImportanceResult | None, bool]] = []
         self.configuration_checks = 0
 
@@ -250,6 +258,8 @@ class _ImportanceService:
         await asyncio.sleep(0)
         if self.fail:
             raise LLMError("Не удалось получить оценку общей важности.")
+        if len(self.calls) in self.mutate_calls:
+            self.state.row.body_text += " изменено"
         if prior_result is not None and not force:
             return ImportanceRun(result=prior_result, reused=True, elapsed_seconds=0.0)
         return ImportanceRun(result=_importance_for(summary), reused=False, elapsed_seconds=0.0)
@@ -368,18 +378,67 @@ def test_stale_all_retries_complete_requested_set_once_from_fresh_snapshot() -> 
         None,
         None,
     ]
-    assert len(importance.calls) == 2
-    assert len(relevance.calls) == 2
+    assert len(importance.calls) == 1
+    assert len(relevance.calls) == 1
     assert outcome.summary.status == AnalysisStatus.CURRENT
     assert outcome.importance.status == AnalysisStatus.CURRENT
     assert outcome.relevance.status == AnalysisStatus.CURRENT
     stored = FeedItemAIMetadata.model_validate(state.row.ai_metadata)
     score_metadata = UserItemScoreAIMetadata.model_validate(state.score.analysis_metadata)
     assert stored.summary.stale_candidate.result.summary == "Сводка: Исходный текст A"
-    assert stored.importance.stale_candidate.result.total_score == 1.0
-    assert score_metadata.relevance.stale_candidate.result.relevance == 0.8
+    assert stored.importance.stale_candidate is None
+    assert score_metadata.relevance.stale_candidate is None
     assert state.row.summary == "Сводка: Исходный текст A изменено"
     assert state.active_sessions == 0
+
+
+def test_all_skips_scores_when_summary_save_is_stale_twice() -> None:
+    state = _State()
+    summary = _SummaryService(state, mutate_calls={1, 2})
+    importance = _ImportanceService(state)
+    relevance = _RelevanceService(state)
+
+    outcome = _run(
+        _use_case(state, summary=summary, importance=importance, relevance=relevance).run(
+            7,
+            operation=AnalysisOperation.ALL,
+            user_id=17,
+            interests=["тема"],
+        )
+    )
+
+    assert outcome.attempt_count == 2
+    assert outcome.summary.status == AnalysisStatus.STALE_CANDIDATE
+    assert outcome.importance.status == AnalysisStatus.SKIPPED
+    assert outcome.relevance.status == AnalysisStatus.SKIPPED
+    assert not importance.calls and not relevance.calls
+    assert state.score is None
+
+
+def test_score_time_mutation_preserves_paid_stale_result_then_retries() -> None:
+    state = _State()
+    summary = _SummaryService(state)
+    importance = _ImportanceService(state, mutate_calls={1})
+    relevance = _RelevanceService(state)
+
+    outcome = _run(
+        _use_case(state, summary=summary, importance=importance, relevance=relevance).run(
+            7,
+            operation=AnalysisOperation.ALL,
+            user_id=17,
+            interests=["тема"],
+        )
+    )
+
+    assert outcome.attempt_count == 2
+    assert len(importance.calls) == 2
+    assert len(relevance.calls) == 1
+    assert outcome.summary.status == AnalysisStatus.CURRENT
+    assert outcome.importance.status == AnalysisStatus.CURRENT
+    assert outcome.relevance.status == AnalysisStatus.CURRENT
+    stored = FeedItemAIMetadata.model_validate(state.row.ai_metadata)
+    assert stored.importance.stale_candidate.result.total_score == 1.0
+    assert state.row.summary == "Сводка: Исходный текст A изменено"
 
 
 def test_repeated_all_reuses_current_summary_and_both_scores() -> None:

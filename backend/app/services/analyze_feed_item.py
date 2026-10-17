@@ -178,11 +178,18 @@ class FeedItemAnalysisUseCase:
                         importance=self._skipped_step(analysis_operation.includes_importance),
                         relevance=self._skipped_step(analysis_operation.includes_relevance),
                     )
-                stale_candidate_saved = summary_step.status is AnalysisStatus.STALE_CANDIDATE
-                operation_failed = summary_step.status is AnalysisStatus.FAILED
-                if analysis_operation is AnalysisOperation.SUMMARY:
-                    if stale_candidate_saved and attempt == 1:
+                if summary_step.status is AnalysisStatus.STALE_CANDIDATE:
+                    if attempt == 1:
                         continue
+                    return self._outcome(
+                        feed_item_id,
+                        analysis_operation,
+                        attempt,
+                        summary=summary_step,
+                        importance=self._skipped_step(analysis_operation.includes_importance),
+                        relevance=self._skipped_step(analysis_operation.includes_relevance),
+                    )
+                if analysis_operation is AnalysisOperation.SUMMARY:
                     return self._outcome(
                         feed_item_id, analysis_operation, attempt, summary=summary_step
                     )
@@ -208,7 +215,17 @@ class FeedItemAnalysisUseCase:
                     summary_is_current=summary_is_current,
                 )
                 operation_failed = operation_failed or failed
-                stale_candidate_saved = stale_candidate_saved or stale
+                if stale:
+                    if attempt == 1 and not operation_failed:
+                        continue
+                    return self._outcome(
+                        feed_item_id,
+                        analysis_operation,
+                        attempt,
+                        summary=summary_step,
+                        importance=importance_step,
+                        relevance=self._skipped_step(analysis_operation.includes_relevance),
+                    )
 
             if analysis_operation.includes_relevance:
                 relevance_step, failed, stale = await self._score_relevance(
