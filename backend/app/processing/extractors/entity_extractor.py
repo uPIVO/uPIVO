@@ -143,6 +143,13 @@ _PATH_TOOL_RULES: tuple[tuple[str, str, str], ...] = (
     ("github.com", "/features/copilot", "GitHub Copilot"),
 )
 
+_HTML_CODE_RE = re.compile(r"(?is)<(?P<tag>code|pre)\b[^>]*>.*?</(?P=tag)\s*>")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\r\n]*(?:\r?\n|$)")
+_INLINE_CODE_RE = re.compile(
+    r"(?<!\\)(?<!`)(?P<delimiter>`+)(?!`).*?(?<!`)(?P=delimiter)(?!`)",
+    re.DOTALL,
+)
+
 _URL_RE = re.compile(
     r"(?i)(?:https?://|www\.)[^\s<>\"'`]+|"
     r"(?<![\w@])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}"
@@ -189,31 +196,35 @@ def extract_entities(item: FeedItem, source_type: SourceType) -> ExtractedEntiti
     url_keys: set[str] = set()
 
     for text in text_values:
-        _extend_unique(hashtags, hashtag_keys, _text_hashtags(text), key=str.casefold)
+        discovery_text, url_text = _prepare_text(text)
+        _extend_unique(hashtags, hashtag_keys, _text_hashtags(discovery_text), key=str.casefold)
         _extend_unique(
             mentions,
             mention_keys,
-            _text_mentions(text, source_type),
+            _text_mentions(discovery_text, source_type),
             key=str.casefold,
         )
-        _extend_urls(urls, url_keys, _text_urls(text))
+        _extend_urls(urls, url_keys, _text_urls(url_text))
 
     # Учитываются явные списки; поля Habr `tags` и `hubs`
     # отдельно не являются хештегами.
     for value in _strings(raw_payload.get("hashtags")):
-        _extend_unique(hashtags, hashtag_keys, _text_hashtags(value), key=str.casefold)
+        discovery_text, _ = _prepare_text(value)
+        _extend_unique(hashtags, hashtag_keys, _text_hashtags(discovery_text), key=str.casefold)
         tag = _explicit_hashtag(value)
         if tag is not None:
             _extend_unique(hashtags, hashtag_keys, (tag,), key=str.casefold)
     for value in _strings(raw_payload.get("mentions")):
+        discovery_text, _ = _prepare_text(value)
         _extend_unique(
             mentions,
             mention_keys,
-            _text_mentions(value, source_type),
+            _text_mentions(discovery_text, source_type),
             key=str.casefold,
         )
     for value in _strings(raw_payload.get("urls")):
-        _extend_urls(urls, url_keys, _text_urls(value))
+        _, url_text = _prepare_text(value)
+        _extend_urls(urls, url_keys, _text_urls(url_text))
 
     if source_type is SourceType.REDDIT:
         self_links = _self_link_keys(item, raw_payload)
@@ -274,8 +285,234 @@ def apply_extracted_entities(item: FeedItem, source_type: SourceType) -> Extract
     return result
 
 
+def _mask_content(value: str) -> str:
+    return "".join(
+        "\n" if character == "\n" else "\r" if character == "\r" else " "
+        for character in value
+    )
+
+
+def _mask_fenced_code(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    masked = list(text)
+    index = 0
+    while index < len(lines):
+        opening = _FENCE_OPEN_RE.match(lines[index])
+        if opening is None:
+            index += 1
+            continue
+
+        fence = opening.group("fence")
+        closing_index = None
+        for candidate_index in range(index + 1, len(lines)):
+            candidate = lines[candidate_index].rstrip("\r\n")
+            indentation = len(candidate) - len(candidate.lstrip(" "))
+            marker = candidate[indentation:].rstrip(" ")
+            if (
+                indentation <= 3
+                and len(marker) >= len(fence)
+                and marker
+                and all(character == fence[0] for character in marker)
+            ):
+                closing_index = candidate_index
+                break
+
+        end_index = closing_index if closing_index is not None else len(lines) - 1
+        start_offset = offsets[index]
+        end_offset = offsets[end_index] + len(lines[end_index])
+        for position in range(start_offset, end_offset):
+            if text[position] not in "\r\n":
+                masked[position] = " "
+        index = end_index + 1
+
+    return "".join(masked)
+
+
+def _mask_code(text: str) -> str:
+    text = _HTML_CODE_RE.sub(lambda match: _mask_content(match.group()), text)
+    text = _mask_fenced_code(text)
+    return _INLINE_CODE_RE.sub(lambda match: _mask_content(match.group()), text)
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
+
+
+def _find_markdown_label_end(text: str, start: int) -> int | None:
+    depth = 1
+    index = start + 1
+    while index < len(text):
+        if _is_escaped(text, index):
+            index += 1
+            continue
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _parse_markdown_link(text: str, label_end: int) -> tuple[str, int] | None:
+    opening = label_end + 1
+    if opening >= len(text) or text[opening] != "(":
+        return None
+
+    index = opening + 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return None
+
+    if text[index] == "<":
+        target_start = index + 1
+        index = target_start
+        while index < len(text) and text[index] != ">":
+            if text[index] in "\r\n":
+                return None
+            if _is_escaped(text, index):
+                index += 1
+            index += 1
+        if index >= len(text):
+            return None
+        target = text[target_start:index]
+        index += 1
+    else:
+        target_start = index
+        depth = 0
+        while index < len(text):
+            if _is_escaped(text, index):
+                index += 1
+            elif text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                if depth == 0:
+                    return text[target_start:index], index + 1
+                depth -= 1
+            elif text[index].isspace() and depth == 0:
+                break
+            index += 1
+        target = text[target_start:index]
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == ")":
+        return target, index + 1
+
+    if index < len(text) and text[index] in "\"'":
+        quote = text[index]
+        index += 1
+        while index < len(text):
+            if _is_escaped(text, index):
+                index += 1
+            elif text[index] == quote:
+                index += 1
+                break
+            index += 1
+    elif index < len(text) and text[index] == "(":
+        depth = 1
+        index += 1
+        while index < len(text) and depth:
+            if _is_escaped(text, index):
+                index += 1
+            elif text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            return None
+    else:
+        return None
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text) or text[index] != ")":
+        return None
+    return target, index + 1
+
+
+def _unescape_markdown(value: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        if (
+            value[index] == "\\"
+            and index + 1 < len(value)
+            and not value[index + 1].isalnum()
+            and not value[index + 1].isspace()
+        ):
+            index += 1
+        result.append(value[index])
+        index += 1
+    return "".join(result)
+
+
+def _same_url_label(label: str, target: str) -> bool:
+    label_url = _normalize_url(_unescape_markdown(label.strip()))
+    target_url = _normalize_url(_unescape_markdown(target.strip()))
+    return (
+        label_url is not None
+        and target_url is not None
+        and _url_identity(label_url) == _url_identity(target_url)
+    )
+
+
+def _prepare_text(text: str) -> tuple[str, str]:
+    text = _mask_code(text)
+    entity_text = list(text)
+    url_text: list[str] = []
+    text_cursor = 0
+    index = 0
+    while index < len(text):
+        if text[index] != "[" or _is_escaped(text, index):
+            index += 1
+            continue
+        label_end = _find_markdown_label_end(text, index)
+        if label_end is None:
+            index += 1
+            continue
+        link = _parse_markdown_link(text, label_end)
+        if link is None:
+            index = label_end + 1
+            continue
+        target, link_end = link
+        label = text[index + 1 : label_end]
+        prefix_end = index + 1 if _same_url_label(label, target) else label_end
+        url_text.extend(
+            (text[text_cursor:prefix_end], " ", _unescape_markdown(target), " ")
+        )
+        text_cursor = link_end
+        for position in range(label_end, link_end):
+            if text[position] not in "\r\n":
+                entity_text[position] = " "
+        index = link_end
+    url_text.append(text[text_cursor:])
+    return "".join(entity_text), "".join(url_text)
+
+
 def _text_hashtags(text: str) -> Iterable[str]:
-    url_spans = tuple((match.start(), match.end()) for match in _URL_RE.finditer(text))
+    url_spans = tuple(
+        (match.start(), match.end())
+        for match in _URL_RE.finditer(text)
+        if _normalize_url(match.group(0)) is not None
+    )
     index = 0
     while index < len(text):
         if _inside_spans(index, url_spans):
@@ -298,7 +535,11 @@ def _text_hashtags(text: str) -> Iterable[str]:
 
 
 def _text_mentions(text: str, source_type: SourceType) -> Iterable[str]:
-    url_spans = tuple((match.start(), match.end()) for match in _URL_RE.finditer(text))
+    url_spans = tuple(
+        (match.start(), match.end())
+        for match in _URL_RE.finditer(text)
+        if _normalize_url(match.group(0)) is not None
+    )
     index = 0
     while index < len(text):
         if _inside_spans(index, url_spans):
@@ -324,18 +565,18 @@ def _text_mentions(text: str, source_type: SourceType) -> Iterable[str]:
         elif source_type is SourceType.REDDIT and text[index : index + 2].casefold() == "u/":
             previous = text[index - 1] if index else ""
             start = index + 2
-            if (
-                not _is_mention_boundary_blocker(previous)
-                and start < len(text)
-                and _is_word_or_mark(text[start])
-            ):
-                end = start + 1
-                while end < len(text) and _is_handle_char(text[end]):
+            if not _is_mention_boundary_blocker(previous) and start < len(text):
+                end = start
+                while end < len(text) and text[end].isascii() and (
+                    text[end].isalnum() or text[end] in "._-"
+                ):
                     end += 1
-                while end > start and text[end - 1] in ".-":
-                    end -= 1
-                if end > start:
-                    yield f"u/{text[start:end]}"
+                username = text[start:end]
+                valid_username = re.fullmatch(r"[A-Za-z0-9_-]{3,20}", username) is not None
+                if end < len(text) and (text[end].isalnum() or text[end] in "._-/"):
+                    valid_username = False
+                if valid_username:
+                    yield f"u/{username}"
                     index = end
                     continue
         index += 1
@@ -357,23 +598,31 @@ def _normalized_urls(value: str) -> Iterable[tuple[str, str]]:
 
 def _normalize_url(value: str) -> str | None:
     candidate = _trim_url_punctuation(html.unescape(value.strip()))
+    allow_bare_tool_host = False
     if candidate.casefold().startswith("www."):
         candidate = f"https://{candidate}"
     elif not candidate.casefold().startswith(("http://", "https://")):
         if not _BARE_URL_RE.fullmatch(candidate):
             return None
         candidate = f"https://{candidate}"
+        allow_bare_tool_host = True
     try:
         parsed = urlsplit(candidate)
         hostname = parsed.hostname
         _ = parsed.port  # Проверить диапазон порта.
     except ValueError:
         return None
+    normalized_hostname = hostname.casefold().rstrip(".") if hostname else ""
     if (
         parsed.scheme.casefold() not in {"http", "https"}
         or not hostname
         or not _valid_hostname(hostname)
         or any(character.isspace() or ord(character) < 32 for character in candidate)
+    ):
+        return None
+    if allow_bare_tool_host and not any(
+        normalized_hostname == domain or normalized_hostname.endswith(f".{domain}")
+        for domain in _TOOL_DOMAINS
     ):
         return None
     return urlunsplit(

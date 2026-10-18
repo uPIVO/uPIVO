@@ -152,10 +152,76 @@ def test_markdown_html_urls_and_tool_domain_boundaries_and_path_precedence():
         "https://fakegithub.com/path",
         "https://github.com.evil/path",
         "https://hub.docker.com/r/example?a=1&b=2",
-        "https://example.net/docs",
     ]
     assert result["tools"] == ["GitHub Copilot", "GitHub", "Docker Hub"]
     assert extract_entities(_item(body_text="GitHub Copilot"), SourceType.WEBSITE)["tools"] == []
+
+
+def test_code_markup_is_ignored_without_losing_real_mentions_and_urls():
+    item = _item(
+        body_text=(
+            "#видимый @real_user u/real_user u/invalid.name "
+            "u/pytest.fixture(scope='module') u/x u/this_username_is_over_twenty "
+            "`@inline u/inline_user github.com/inline context.client`\n"
+            "```python\n"
+            "u/pytest.fixture(scope='module')\n"
+            "client.create() clicked.connect() youtube.com\n"
+            "```\n"
+            "<code>@htmluser u/htmluser github.com/html context.client</code> "
+            "<pre>https://github.com/ignored</pre> "
+            "https://real.example.org/path"
+        )
+    )
+
+    result = extract_entities(item, SourceType.REDDIT)
+
+    assert result["hashtags"] == ["видимый"]
+    assert result["mentions"] == ["@real_user", "u/real_user"]
+    assert result["urls"] == ["https://real.example.org/path"]
+    assert result["tools"] == []
+
+
+def test_markdown_url_labels_and_relative_anchors_are_tokenized_separately():
+    item = _item(
+        body_text=(
+            "[Daily Beginner Thread](#daily-beginner-thread-link) "
+            "[#важное @linked_user](#section) "
+            "#настоящий "
+            "[https://github.com/org/repo](https://github.com/org/repo) "
+            "[https://example.org/a(b)](https://example.org/a(b)) "
+            "[https://github.com/org/kirkwood\\_gaps.ipynb](https://github.com/org/kirkwood_gaps.ipynb)"
+        )
+    )
+
+    result = extract_entities(item, SourceType.REDDIT)
+
+    assert result["hashtags"] == ["важное", "настоящий"]
+    assert result["mentions"] == ["@linked_user"]
+    assert result["urls"] == [
+        "https://github.com/org/repo",
+        "https://example.org/a(b)",
+        "https://github.com/org/kirkwood_gaps.ipynb",
+    ]
+    assert result["tools"] == ["GitHub"]
+
+
+def test_bare_domains_are_limited_to_www_and_known_tool_hosts():
+    item = _item(
+        body_text=(
+            "github.com/org/repo www.example.net/docs example.net/docs "
+            "context.client client.create clicked.connect pytest.fixture "
+            "https://example.org/explicit"
+        )
+    )
+
+    result = extract_entities(item, SourceType.REDDIT)
+
+    assert result["urls"] == [
+        "https://github.com/org/repo",
+        "https://www.example.net/docs",
+        "https://example.org/explicit",
+    ]
+    assert result["tools"] == ["GitHub"]
 
 
 def test_url_fragments_are_not_hashtags_and_invalid_hosts_are_rejected():
@@ -326,7 +392,7 @@ def test_cli_selects_normalized_database_item_read_only_and_uses_joined_source_t
 ):
     item = _item(
         title="Существующая публикация",
-        body_text="Ответ u/Алиса #Проект.",
+        body_text="Ответ u/alisa #Проект.",
         original_url="https://reddit.com/r/test/comments/1/post",
         raw_payload={"url": "https://github.com/example"},
         extracted_entities={"keep": True},
@@ -346,17 +412,17 @@ def test_cli_selects_normalized_database_item_read_only_and_uses_joined_source_t
     assert "42\treddit\tСуществующая публикация" in output
     assert '"source_type": "reddit"' in output
     assert '"title": "Существующая публикация"' in output
-    assert '"body_text": "Ответ u/Алиса #Проект."' in output
+    assert '"body_text": "Ответ u/alisa #Проект."' in output
     assert '"original_url": "https://reddit.com/r/test/comments/1/post"' in output
     assert '"raw_payload": {\n    "url": "https://github.com/example"' in output
-    assert '"mentions": [\n    "u/Алиса"' in output
+    assert '"mentions": [\n    "u/alisa"' in output
     assert prompts == ["ID публикации для проверки: "]
     statement = session.statements[0]
     assert str(statement).lstrip().startswith("SELECT")
     assert "sources.type" in str(statement)
     assert ProcessingStatus.NORMALIZED in statement.compile().params.values()
     assert item.extracted_entities == {"keep": True}
-    assert item.body_text == "Ответ u/Алиса #Проект."
+    assert item.body_text == "Ответ u/alisa #Проект."
     assert session.commit_calls == 0
     assert session.flush_calls == 0
     assert session.no_autoflush_calls == 1
