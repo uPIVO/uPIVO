@@ -117,6 +117,8 @@ CREATE TABLE feed_items (
     content_hash VARCHAR(64),
     summary TEXT,
     importance_score DOUBLE PRECISION,
+    -- Полные результаты анализа, отпечатки входов и их статус без секретов.
+    ai_metadata JSONB,
     processing_status processing_status NOT NULL DEFAULT 'pending',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP,
@@ -137,6 +139,9 @@ CREATE INDEX idx_feed_items_source_id
 -- =========================
 -- CONTENT CLUSTERS
 -- =========================
+-- Целевая схема варианта A для будущей интеграции кластеров.
+-- Промежуточный Stage 4 ITD-17 пока сохраняет анализ только для FeedItem:
+-- здесь намеренно нет content_clusters.importance_score и cluster_id в user_item_scores.
 
 CREATE TABLE content_clusters (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -161,16 +166,22 @@ CREATE INDEX idx_cluster_items_feed_item_id
 -- =========================
 -- PERSONAL RANKING
 -- =========================
+-- Промежуточная реализация ITD-17 поддерживает только целевую единицу feed_item.
+-- Будущие cluster_id и XOR-ограничение добавляются после интеграции ORM кластеров.
 
 CREATE TABLE user_item_scores (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    feed_item_id BIGINT NOT NULL REFERENCES feed_items(id),
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    feed_item_id BIGINT NOT NULL REFERENCES feed_items(id) ON DELETE CASCADE,
     relevance_score DOUBLE PRECISION,
     rank_score DOUBLE PRECISION,
     reason TEXT,
     calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- DTO релевантности и отпечатки; исходные интересы не сохраняются.
+    analysis_metadata JSONB,
 
+    CONSTRAINT ck_user_item_scores_relevance_range
+        CHECK (relevance_score IS NULL OR (relevance_score >= 0.0 AND relevance_score <= 1.0)),
     CONSTRAINT uq_user_item_scores_user_feed
         UNIQUE (user_id, feed_item_id)
 );
