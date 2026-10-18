@@ -1,0 +1,29 @@
+[
+  {
+    "kind": "youtube_rss_entry",
+    "video_id": "artemisA0001",
+    "title": "NASA landed the Artemis crew on the Moon after a four-day flight",
+    "link": "https://www.youtube.com/watch?v=artemisA0001",
+    "published": "2026-10-01T19:00:13+00:00",
+    "author": "NASA",
+    "transcript": "The crew touched down near the south pole and began surface checks."
+  },
+  {
+    "kind": "youtube_rss_entry",
+    "video_id": "artemisB0002",
+    "title": "Artemis crew has landed on the Moon, NASA confirms the four-day mission",
+    "link": "https://www.youtube.com/watch?v=artemisB0002",
+    "published": "2026-10-01T20:00:13+00:00",
+    "author": "Space News",
+    "transcript": "NASA said the landing ended the outbound flight and surface work starts now."
+  },
+  {
+    "kind": "youtube_rss_entry",
+    "video_id": "iphoneC00003",
+    "title": "Apple unveiled the iPhone 17 with a new camera",
+    "link": "https://www.youtube.com/watch?v=iphoneC00003",
+    "published": "2026-10-02T12:00:00+00:00",
+    "author": "Apple",
+    "transcript": "The phone adds a brighter sensor."
+  }
+]
