@@ -1,8 +1,10 @@
 import json
 
+from sqlalchemy.exc import SQLAlchemyError
+
+import app.processing.extractors.__main__ as extractor_cli
 from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
-from app.processing.extractors.__main__ import main
 from app.processing.extractors.entity_extractor import apply_extracted_entities, extract_entities
 
 
@@ -226,19 +228,202 @@ def test_apply_updates_only_extracted_entities_and_is_repeatable():
     assert {key: getattr(item, key) for key in protected} == protected
 
 
-def test_interactive_cli_accepts_json_payload_without_database(capsys):
-    answers = iter(
-        [
-            "telegram",
-            "Заголовок #Тест",
-            "Текст https://example.org",
-            "",
-        ]
+class _FakeResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+
+class _FakeNoAutoflush:
+    def __init__(self, session):
+        self.session = session
+
+    def __enter__(self):
+        self.session.no_autoflush_calls += 1
+        return None
+
+    def __exit__(self, *_exc_info):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, rows=(), error=None):
+        self.rows = list(rows)
+        self.error = error
+        self.statements = []
+        self.commit_calls = 0
+        self.flush_calls = 0
+        self.close_calls = 0
+        self.no_autoflush_calls = 0
+        self.no_autoflush = _FakeNoAutoflush(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        self.close_calls += 1
+
+    def execute(self, statement):
+        self.statements.append(statement)
+        if self.error is not None:
+            raise self.error
+        return _FakeResult(self.rows)
+
+    def commit(self):
+        self.commit_calls += 1
+
+    def flush(self):
+        self.flush_calls += 1
+
+
+def test_fixture_cli_is_explicit_offline_mode_and_displays_inputs(tmp_path, capsys, monkeypatch):
+    fixture = tmp_path / "feed-item.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "source_type": "telegram",
+                "title": "Заголовок #Тест",
+                "body_text": "Текст https://example.org",
+                "original_url": "https://t.me/channel/1",
+                "raw_payload": {"text": "raw"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
 
-    assert main([], input_fn=lambda _prompt: next(answers)) == 0
+    def unexpected_database_access():
+        raise AssertionError("fixture mode must not open a database session")
 
-    output = json.loads(capsys.readouterr().out)
-    assert output["hashtags"] == ["тест"]
-    assert output["urls"] == ["https://example.org"]
-    assert output["has_media"] is None
+    monkeypatch.setattr(extractor_cli, "_open_session", unexpected_database_access)
+
+    assert extractor_cli.main(["--fixture", str(fixture)]) == 0
+
+    output = capsys.readouterr().out
+    assert "Входные данные" in output
+    assert '"source_type": "telegram"' in output
+    assert '"original_url": "https://t.me/channel/1"' in output
+    assert '"raw_payload": {' in output
+    assert "Результат извлечения" in output
+    assert '"hashtags": [\n    "тест"' in output
+    assert '"urls": [\n    "https://example.org"' in output
+
+
+def test_cli_selects_normalized_database_item_read_only_and_uses_joined_source_type(
+    monkeypatch, capsys
+):
+    item = _item(
+        title="Существующая публикация",
+        body_text="Ответ u/Алиса #Проект.",
+        original_url="https://reddit.com/r/test/comments/1/post",
+        raw_payload={"url": "https://github.com/example"},
+        extracted_entities={"keep": True},
+    )
+    item.id = 42
+    session = _FakeSession([(item, SourceType.REDDIT)])
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+    prompts = []
+
+    def select_item(prompt):
+        prompts.append(prompt)
+        return "42"
+
+    assert extractor_cli.main([], input_fn=select_item) == 0
+
+    output = capsys.readouterr().out
+    assert "42\treddit\tСуществующая публикация" in output
+    assert '"source_type": "reddit"' in output
+    assert '"title": "Существующая публикация"' in output
+    assert '"body_text": "Ответ u/Алиса #Проект."' in output
+    assert '"original_url": "https://reddit.com/r/test/comments/1/post"' in output
+    assert '"raw_payload": {\n    "url": "https://github.com/example"' in output
+    assert '"mentions": [\n    "u/Алиса"' in output
+    assert prompts == ["ID публикации для проверки: "]
+    statement = session.statements[0]
+    assert str(statement).lstrip().startswith("SELECT")
+    assert "sources.type" in str(statement)
+    assert ProcessingStatus.NORMALIZED in statement.compile().params.values()
+    assert item.extracted_entities == {"keep": True}
+    assert item.body_text == "Ответ u/Алиса #Проект."
+    assert session.commit_calls == 0
+    assert session.flush_calls == 0
+    assert session.no_autoflush_calls == 1
+    assert session.close_calls == 1
+
+
+def test_cli_item_id_reads_normalized_item_without_prompt(monkeypatch, capsys):
+    item = _item(
+        title="Видео",
+        body_text="Описание публикации",
+        raw_payload={"video_id": "abcdefghijk"},
+    )
+    item.id = 43
+    session = _FakeSession([(item, SourceType.YOUTUBE)])
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+
+    def unexpected_prompt(_prompt):
+        raise AssertionError("--item-id must not prompt for input")
+
+    assert extractor_cli.main(["--item-id", "43"], input_fn=unexpected_prompt) == 0
+
+    output = capsys.readouterr().out
+    assert '"source_type": "youtube"' in output
+    assert '"has_media": true' in output
+    assert "Нормализованные публикации (последние" not in output
+    assert session.commit_calls == 0
+    assert session.flush_calls == 0
+    assert session.no_autoflush_calls == 1
+    assert session.close_calls == 1
+
+
+def test_cli_rejects_id_not_in_recent_selection(monkeypatch, capsys):
+    item = _item(title="Публикация")
+    item.id = 42
+    session = _FakeSession([(item, SourceType.TELEGRAM)])
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+
+    assert extractor_cli.main([], input_fn=lambda _prompt: "404") == 2
+
+    assert "отсутствует в списке" in capsys.readouterr().err.lower()
+    assert item.extracted_entities is None
+    assert session.commit_calls == 0
+    assert session.flush_calls == 0
+    assert session.no_autoflush_calls == 1
+    assert session.close_calls == 1
+
+
+def test_cli_item_id_reports_missing_or_unnormalized_item(monkeypatch, capsys):
+    session = _FakeSession()
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+
+    assert extractor_cli.main(["--item-id", "404"], input_fn=lambda _prompt: "unexpected") == 2
+
+    assert "не найден" in capsys.readouterr().err.lower()
+    assert session.commit_calls == 0
+    assert session.flush_calls == 0
+    assert session.no_autoflush_calls == 1
+    assert session.close_calls == 1
+
+
+def test_cli_handles_empty_normalized_list_and_database_errors(monkeypatch, capsys):
+    empty_session = _FakeSession()
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: empty_session)
+    assert extractor_cli.main([], input_fn=lambda _prompt: "unexpected") == 0
+    output = capsys.readouterr().out.lower()
+    assert "нет нормализованных публикаций" in output
+    assert empty_session.no_autoflush_calls == 1
+    assert empty_session.close_calls == 1
+
+    failed_session = _FakeSession(error=SQLAlchemyError("database unavailable"))
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: failed_session)
+    assert extractor_cli.main(["--item-id", "1"]) == 1
+    assert "ошибка чтения" in capsys.readouterr().err.lower()
+    assert failed_session.no_autoflush_calls == 1
+    assert failed_session.close_calls == 1
+    assert failed_session.commit_calls == 0
+    assert failed_session.flush_calls == 0

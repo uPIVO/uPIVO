@@ -1,5 +1,5 @@
-"""Локальный интерактивный запуск извлекателя
-без подключения к БД."""
+"""Интерактивная проверка сущностей FeedItem
+без изменения данных в БД."""
 
 from __future__ import annotations
 
@@ -10,39 +10,194 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from app.models.enums import SourceType
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.db.session import get_engine
+from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
+from app.models.source import Source
 from app.processing.extractors.entity_extractor import extract_entities
 
 
 def main(argv: list[str] | None = None, *, input_fn: Callable[[str], str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Проверить извлечение сущностей из FeedItem "
-            "без БД и сетевых запросов."
+            "Интерактивная проверка нормализованных FeedItem "
+            "без изменения данных в БД."
         )
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--fixture",
         type=Path,
+        help="JSON-файл для автономной проверки без БД",
+    )
+    mode.add_argument(
+        "--item-id",
+        type=_positive_item_id,
         help=(
-            "JSON-файл с source_type, title, body_text "
-            "и необязательным raw_payload"
+            "Проверить нормализованную публикацию по ID "
+            "без интерактивного выбора"
         ),
     )
     args = parser.parse_args(argv)
 
-    try:
-        if args.fixture is not None:
+    if args.fixture is not None:
+        try:
             source_type, item = _load_fixture(args.fixture)
-        else:
-            source_type, item = _read_interactively(input_fn or input)
-    except (OSError, json.JSONDecodeError, ValueError, EOFError) as exc:
-        print(f"Не удалось подготовить FeedItem: {exc}", file=sys.stderr)
-        return 2
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"Не удалось прочитать fixture: {exc}", file=sys.stderr)
+            return 2
+        _display_item_and_result(item, source_type)
+        return 0
 
-    print(json.dumps(extract_entities(item, source_type), ensure_ascii=False, indent=2))
-    return 0
+    return _run_database(item_id=args.item_id, input_fn=input_fn or input)
+
+
+MAX_RECENT_ITEMS = 20
+
+
+def _positive_item_id(value: str) -> int:
+    try:
+        item_id = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "ID должен быть целым числом"
+        ) from exc
+    if item_id <= 0:
+        raise argparse.ArgumentTypeError(
+            "ID должен быть положительным числом"
+        )
+    return item_id
+
+
+def _open_session() -> Session:
+    return Session(get_engine())
+
+
+def _list_recent_normalized_items(
+    session: Session,
+) -> list[tuple[FeedItem, SourceType]]:
+    statement = (
+        select(FeedItem, Source.type)
+        .join(Source, Source.id == FeedItem.source_id)
+        .where(FeedItem.processing_status == ProcessingStatus.NORMALIZED)
+        .order_by(FeedItem.published_at.desc().nulls_last(), FeedItem.id.desc())
+        .limit(MAX_RECENT_ITEMS)
+    )
+    with session.no_autoflush:
+        return [
+            (item, source_type)
+            for item, source_type in session.execute(statement).all()
+        ]
+
+
+def _find_normalized_item(
+    session: Session, item_id: int
+) -> tuple[FeedItem, SourceType] | None:
+    statement = (
+        select(FeedItem, Source.type)
+        .join(Source, Source.id == FeedItem.source_id)
+        .where(
+            FeedItem.id == item_id,
+            FeedItem.processing_status == ProcessingStatus.NORMALIZED,
+        )
+    )
+    with session.no_autoflush:
+        row = session.execute(statement).first()
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+def _run_database(
+    *, item_id: int | None, input_fn: Callable[[str], str]
+) -> int:
+    try:
+        with _open_session() as session:
+            if item_id is None:
+                rows = _list_recent_normalized_items(session)
+                if not rows:
+                    print(
+                        "Нет нормализованных публикаций "
+                        "для проверки."
+                    )
+                    return 0
+                _print_recent_items(rows)
+                try:
+                    selection_prompt = "ID публикации для проверки: "
+                    selection = input_fn(selection_prompt).strip()
+                    selected_id = int(selection)
+                except ValueError:
+                    print("Введите числовой ID из списка.", file=sys.stderr)
+                    return 2
+                row = next(
+                    (
+                        candidate
+                        for candidate in rows
+                        if candidate[0].id == selected_id
+                    ),
+                    None,
+                )
+                if row is None:
+                    print(
+                        "Публикация с этим ID отсутствует "
+                        "в списке.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            else:
+                row = _find_normalized_item(session, item_id)
+                if row is None:
+                    print(
+                        "Публикация не найдена "
+                        "или ещё не нормализована.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            item, source_type = row
+            _display_item_and_result(item, source_type)
+        return 0
+    except EOFError:
+        print("Ввод ID прерван.", file=sys.stderr)
+        return 2
+    except SQLAlchemyError as exc:
+        error_type = type(exc).__name__
+        print(
+            f"Ошибка чтения публикаций из БД ({error_type}).",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _print_recent_items(rows: list[tuple[FeedItem, SourceType]]) -> None:
+    print(
+        "Нормализованные публикации "
+        f"(последние {MAX_RECENT_ITEMS}):"
+    )
+    for item, source_type in rows:
+        title = " ".join((item.title or "Без заголовка").split())
+        if len(title) > 120:
+            title = f"{title[:117]}..."
+        print(f"{item.id}\t{source_type.value}\t{title}")
+
+
+def _display_item_and_result(item: FeedItem, source_type: SourceType) -> None:
+    extraction_input = {
+        "item_id": item.id,
+        "source_type": source_type.value,
+        "title": item.title,
+        "body_text": item.body_text,
+        "raw_payload": item.raw_payload,
+        "original_url": item.original_url,
+    }
+    print("=== Входные данные извлечения ===")
+    print(json.dumps(extraction_input, ensure_ascii=False, indent=2))
+    print("=== Результат извлечения (не сохранён) ===")
+    result = extract_entities(item, source_type)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def _load_fixture(path: Path) -> tuple[SourceType, FeedItem]:
@@ -57,16 +212,6 @@ def _load_fixture(path: Path) -> tuple[SourceType, FeedItem]:
         if value is not None and not isinstance(value, str):
             raise ValueError(f"поле {name} должно быть строкой")
     return source_type, _make_item(title, body_text, original_url or "", data.get("raw_payload"))
-
-
-def _read_interactively(input_fn: Callable[[str], str]) -> tuple[SourceType, FeedItem]:
-    accepted = ", ".join(source.value for source in SourceType)
-    source_type = _source_type(input_fn(f"Тип источника ({accepted}): "))
-    title = input_fn("Заголовок (можно оставить пустым): ") or None
-    body_text = input_fn("Текст публикации (одна строка): ")
-    raw_text = input_fn("raw_payload в JSON (Enter — без метаданных): ").strip()
-    raw_payload = json.loads(raw_text) if raw_text else None
-    return source_type, _make_item(title, body_text, "", raw_payload)
 
 
 def _source_type(value: object) -> SourceType:
@@ -87,8 +232,8 @@ def _make_item(
     original_url: str,
     raw_payload: Any,
 ) -> FeedItem:
-    # Транзиентный ORM-объект: CLI не открывает сессию
-    # и не сохраняет изменения.
+    # Объект предназначен только для локальной проверки
+    # fixture; CLI не сохраняет его в БД.
     return FeedItem(
         source_id=0,
         external_id="interactive-test",
