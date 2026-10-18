@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from app.ai.analysis_policy import load_analysis_policy
 from app.ai.base import LLMError
 from app.ai.dto import ContentUnitInput, SummaryResult, SummaryUsage
 from app.ai.openrouter import OpenRouterAdapter
@@ -278,7 +280,9 @@ def test_openrouter_sends_every_publication_as_untrusted_json_and_returns_metada
 
     async def request_summary() -> SummaryResult:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenRouterAdapter(_settings(), client=client)
+            adapter = OpenRouterAdapter(
+                _settings(), model="@preset/request-override", client=client
+            )
             return await adapter.summarize(_unit())
 
     result = _run(request_summary())
@@ -286,18 +290,22 @@ def test_openrouter_sends_every_publication_as_untrusted_json_and_returns_metada
     payload = json.loads(request.content)
     prompt = payload["messages"][1]["content"]
     system_prompt = payload["messages"][0]["content"]
+    policy = load_analysis_policy().summary
 
+    assert system_prompt == policy.system_prompt
+    assert prompt.startswith(policy.user_prompt_prefix)
     assert "недоверенным содержимым" in system_prompt
     assert "расхождения" in system_prompt
     assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
     assert request.headers["authorization"] == f"Bearer {API_KEY}"
-    assert payload["model"] == PRESET
+    assert payload["model"] == "@preset/request-override"
     assert "Источник один" in prompt
     assert "Источник два" in prompt
     assert "Второй источник подтверждает запуск" in prompt
     assert "Публикация о запуске проекта" in prompt
     assert "raw_payload" not in prompt
     assert result.summary == "Оба источника подтверждают запуск."
+    assert result.preset == "@preset/request-override"
     assert result.fingerprint.startswith("v1:")
     assert result.usage is not None
     assert result.usage.total_tokens == 76
@@ -432,6 +440,7 @@ def test_openrouter_fingerprint_covers_output_settings_and_excludes_secret() -> 
     default = OpenRouterAdapter(_settings())
     changed_input = OpenRouterAdapter(_settings())
     changed_preset = OpenRouterAdapter(_settings(llm_model="@preset/another-model"))
+    changed_override = OpenRouterAdapter(_settings(), model="@preset/override-model")
     changed_url = OpenRouterAdapter(_settings(llm_base_url="https://other.example/api/v1"))
     changed_key = OpenRouterAdapter(_settings(llm_api_key=SecretStr("different-secret")))
 
@@ -439,28 +448,72 @@ def test_openrouter_fingerprint_covers_output_settings_and_excludes_secret() -> 
 
     assert changed_input.fingerprint_for(_unit("Иной текст")) != fingerprint
     assert changed_preset.fingerprint_for(unit) != fingerprint
+    assert changed_override.fingerprint_for(unit) != fingerprint
     assert changed_url.fingerprint_for(unit) != fingerprint
     assert changed_key.fingerprint_for(unit) == fingerprint
 
 
-def test_openrouter_fingerprint_covers_prompt_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.ai.openrouter as openrouter
-
+def test_openrouter_fingerprint_covers_loaded_prompt_version_and_text() -> None:
     adapter = OpenRouterAdapter(_settings())
-    before = adapter.fingerprint_for(_unit())
-    monkeypatch.setattr(openrouter, "PROMPT_VERSION", "content-summary-v3")
+    unit = _unit()
+    initial = adapter.fingerprint_for(unit)
+    changed_version = replace(
+        adapter.policy,
+        summary=replace(
+            adapter.policy.summary,
+            prompt_version=f"{adapter.policy.summary.prompt_version}-next",
+        ),
+    )
+    changed_text = replace(
+        adapter.policy,
+        summary=replace(
+            adapter.policy.summary,
+            system_prompt=f"{adapter.policy.summary.system_prompt} Дополнение.",
+        ),
+    )
 
-    assert adapter.fingerprint_for(_unit()) != before
+    assert initial != OpenRouterAdapter(_settings(), policy=changed_version).fingerprint_for(unit)
+    assert initial != OpenRouterAdapter(_settings(), policy=changed_text).fingerprint_for(unit)
 
 
-def test_openrouter_fingerprint_covers_prompt_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.ai.openrouter as openrouter
+def test_openrouter_model_override_is_per_instance_and_blank_is_rejected() -> None:
+    settings = _settings()
+    default = OpenRouterAdapter(settings)
+    override = OpenRouterAdapter(settings, model="  @preset/override-model  ")
 
-    adapter = OpenRouterAdapter(_settings())
-    before = adapter.fingerprint_for(_unit())
-    monkeypatch.setattr(openrouter, "_SYSTEM_PROMPT", "Другая инструкция")
+    assert default.preset == PRESET
+    assert override.preset == "@preset/override-model"
+    assert settings.llm_model == PRESET
+    for model in ("", "   "):
+        with pytest.raises(LLMError):
+            OpenRouterAdapter(settings, model=model)
 
-    assert adapter.fingerprint_for(_unit()) != before
+
+def test_invalid_injected_policy_is_rejected_before_provider_request() -> None:
+    policy = load_analysis_policy()
+    invalid_policy = replace(
+        policy,
+        importance=replace(
+            policy.importance,
+            questions=policy.importance.questions[:-1],
+        ),
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Выжимка"}}]})
+
+    async def summarize() -> SummaryResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenRouterAdapter(_settings(), policy=invalid_policy, client=client)
+            return await adapter.summarize(_unit())
+
+    with pytest.raises(LLMError) as error:
+        _run(summarize())
+
+    assert "analysis_policy.toml" in str(error.value)
+    assert requests == []
 
 
 def test_settings_reject_unbounded_network_timeout() -> None:
@@ -581,12 +634,28 @@ def test_cli_prior_result_round_trip_is_database_free(
     saved_result = tmp_path / "summary.json"
     input_path.write_text(json.dumps(_unit().model_dump(mode="json")), encoding="utf-8")
     adapter = _FakeAdapter()
-    monkeypatch.setattr(cli, "OpenRouterAdapter", lambda settings: adapter)
+    selected_models: list[str | None] = []
 
-    first_exit = cli.main([str(input_path), "--save-result", str(saved_result)])
+    def make_adapter(settings: Settings, *, model: str | None = None) -> _FakeAdapter:
+        selected_models.append(model)
+        return adapter
+
+    monkeypatch.setattr(cli, "OpenRouterAdapter", make_adapter)
+
+    first_exit = cli.main(
+        [str(input_path), "--save-result", str(saved_result), "--model", "summary-cli-override"]
+    )
     first_output = json.loads(capsys.readouterr().out)
     second_exit = cli.main(
-        [str(input_path), "--prior-result", str(saved_result), "--save-result", str(saved_result)]
+        [
+            str(input_path),
+            "--prior-result",
+            str(saved_result),
+            "--save-result",
+            str(saved_result),
+            "--model",
+            "summary-cli-override",
+        ]
     )
     second_output = json.loads(capsys.readouterr().out)
 
@@ -599,6 +668,7 @@ def test_cli_prior_result_round_trip_is_database_free(
     assert second_output["result"]["summary"] == first_output["result"]["summary"]
     assert second_output["result"]["usage"]["total_tokens"] == 53
     assert adapter.calls == 1
+    assert selected_models == ["summary-cli-override", "summary-cli-override"]
 
 
 def test_cli_failed_force_preserves_existing_result_file(
@@ -618,7 +688,7 @@ def test_cli_failed_force_preserves_existing_result_file(
     result_path.write_text(existing_result.model_dump_json(indent=2) + "\n", encoding="utf-8")
     original_contents = result_path.read_bytes()
     failing_adapter = _FailingAdapter()
-    monkeypatch.setattr(cli, "OpenRouterAdapter", lambda settings: failing_adapter)
+    monkeypatch.setattr(cli, "OpenRouterAdapter", lambda settings, model=None: failing_adapter)
 
     exit_code = cli.main(
         [

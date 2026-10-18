@@ -29,8 +29,10 @@ class _FakeUseCase:
 
 
 class _FakeAdapter:
-    def __init__(self, _settings: Any) -> None:
-        return None
+    models: list[str | None] = []
+
+    def __init__(self, _settings: Any, *, model: str | None = None) -> None:
+        self.models.append(model)
 
 
 def test_default_all_requires_user_and_interests_before_configuration_or_database(
@@ -78,8 +80,31 @@ def test_cli_emits_structured_result_without_echoing_interests(
     monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
     monkeypatch.setattr("app.ai.analyze_feed_item.JevImportanceAdapter", _FakeAdapter)
     monkeypatch.setattr("app.ai.analyze_feed_item.JevRelevanceAdapter", _FakeAdapter)
+    _FakeAdapter.models.clear()
 
-    assert main(["7", "--user-id", "17", "--interests", str(interests_path)]) == 0
+    assert (
+        main(
+            [
+                "7",
+                "--user-id",
+                "17",
+                "--interests",
+                str(interests_path),
+                "--summary-model",
+                "summary-override",
+                "--importance-model",
+                "importance-override",
+                "--relevance-model",
+                "relevance-override",
+            ]
+        )
+        == 0
+    )
+    assert _FakeAdapter.models == [
+        "summary-override",
+        "importance-override",
+        "relevance-override",
+    ]
 
     output = capsys.readouterr().out
     parsed = json.loads(output)
@@ -89,6 +114,58 @@ def test_cli_emits_structured_result_without_echoing_interests(
     assert parsed["operations"]["summary"]["result"]["summary"] == "Проверенная выжимка"
     assert private_interest not in output
     assert _FakeUseCase.calls[0]["interests"] == [private_interest]
+
+
+def test_cli_constructs_only_adapters_for_selected_operation(monkeypatch, capsys) -> None:
+    summary = SummaryResult(
+        summary="Проверенная выжимка",
+        fingerprint=f"v1:{hashlib.sha256(b'example').hexdigest()}",
+        provider="openrouter",
+        preset="summary-model",
+    )
+    _FakeUseCase.outcome = FeedItemAnalysisOutcome(
+        feed_item_id=7,
+        operation=AnalysisOperation.SUMMARY,
+        attempt_count=1,
+        summary=AnalysisStepResult(
+            status=AnalysisStatus.CURRENT,
+            reused=False,
+            save_disposition=SaveDisposition.CURRENT,
+            result=summary,
+        ),
+    )
+    _FakeUseCase.calls.clear()
+    _FakeAdapter.models.clear()
+    monkeypatch.setattr("app.ai.analyze_feed_item.FeedItemAnalysisUseCase", _FakeUseCase)
+    monkeypatch.setattr("app.ai.analyze_feed_item.get_settings", lambda: object())
+    monkeypatch.setattr("app.ai.analyze_feed_item.get_engine", lambda: object())
+    monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
+
+    def unexpected_adapter(*_arguments: Any, **_keywords: Any) -> None:
+        raise AssertionError("Невыбранный AI-адаптер не должен создаваться")
+
+    monkeypatch.setattr("app.ai.analyze_feed_item.JevImportanceAdapter", unexpected_adapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.JevRelevanceAdapter", unexpected_adapter)
+
+    assert (
+        main(
+            [
+                "7",
+                "--operation",
+                "summary",
+                "--summary-model",
+                "summary-override",
+                "--importance-model",
+                "unused-importance-override",
+                "--relevance-model",
+                "unused-relevance-override",
+            ]
+        )
+        == 0
+    )
+    assert _FakeAdapter.models == ["summary-override"]
+    assert _FakeUseCase.calls[0]["operation"] == AnalysisOperation.SUMMARY
+    capsys.readouterr()
 
 
 def test_cli_sanitizes_invalid_interest_json_without_echoing_contents(

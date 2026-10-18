@@ -25,9 +25,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _Parser(
-        description="Оценка релевантности готовой выжимки через Jev / TypeSafe."
-    )
+    parser = _Parser(description="Оценка релевантности готовой выжимки через Jev / TypeSafe.")
     parser.add_argument(
         "summary_result",
         type=Path,
@@ -50,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Сохранить оценку и fingerprint для последующего запуска",
     )
     parser.add_argument(
+        "--model",
+        help="Переопределить модель только для этого запуска",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Принудительно получить новую оценку, даже если есть актуальный результат",
@@ -60,16 +62,14 @@ def main(argv: list[str] | None = None) -> int:
         summary_result = _read_summary_result(args.summary_result)
         interests = _read_json(args.interests, "файл со списком интересов")
         prior_result = (
-            _read_relevance_result(args.prior_result)
-            if args.prior_result is not None
-            else None
+            _read_relevance_result(args.prior_result) if args.prior_result is not None else None
         )
         if args.save_result is not None:
             protected_inputs = {args.summary_result.resolve(), args.interests.resolve()}
             if args.save_result.resolve() in protected_inputs:
                 raise LLMError("Файл оценки не должен совпадать с входным файлом.")
 
-        adapter = JevRelevanceAdapter(get_settings())
+        adapter = JevRelevanceAdapter(get_settings(), model=args.model)
         run = asyncio.run(
             RelevanceService(adapter).score_relevance(
                 {"summary": summary_result.summary, "interests": interests},

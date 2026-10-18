@@ -44,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Сохранить компоненты, итог, веса и fingerprint",
     )
     parser.add_argument(
+        "--model",
+        help="Переопределить модель только для этого запуска",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Принудительно получить новую оценку, даже если есть актуальный результат",
@@ -59,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.save_result.resolve() == args.summary_result.resolve():
                 raise LLMError("Файл оценки не должен совпадать с файлом результата суммаризации.")
 
-        adapter = JevImportanceAdapter(get_settings())
+        adapter = JevImportanceAdapter(get_settings(), model=args.model)
         run = asyncio.run(
             ImportanceService(adapter).score_importance(
                 {"summary": summary_result.summary},

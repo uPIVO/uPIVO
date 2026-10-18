@@ -36,6 +36,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Сохранить результат и fingerprint для последующего запуска",
     )
     parser.add_argument(
+        "--model",
+        help="Переопределить модель только для этого запуска",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Принудительно пересчитать выжимку, даже если найден актуальный результат",
@@ -44,10 +48,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         unit_payload = _read_json(args.input, "входной файл")
-        prior_result = (
-            _read_result(args.prior_result) if args.prior_result is not None else None
-        )
-        adapter = OpenRouterAdapter(get_settings())
+        prior_result = _read_result(args.prior_result) if args.prior_result is not None else None
+        adapter = OpenRouterAdapter(get_settings(), model=args.model)
         run = asyncio.run(
             SummarizationService(adapter).summarize(
                 unit_payload,

@@ -93,6 +93,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--user-id", type=_positive_int, help="ID существующего пользователя")
     parser.add_argument("--interests", type=Path, help="JSON-массив интересов для релевантности")
     parser.add_argument(
+        "--summary-model",
+        help="Модель OpenRouter только для summary или all",
+    )
+    parser.add_argument(
+        "--importance-model",
+        help="Модель TypeSafe только для importance или all",
+    )
+    parser.add_argument(
+        "--relevance-model",
+        help="Модель TypeSafe только для relevance или all",
+    )
+    parser.add_argument(
         "--force", action="store_true", help="Не переиспользовать актуальные результаты"
     )
     args = parser.parse_args(argv)
@@ -115,17 +127,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = get_settings()
         summarization_service = (
-            SummarizationService(OpenRouterAdapter(settings))
+            SummarizationService(OpenRouterAdapter(settings, model=args.summary_model))
             if operation.includes_summary
             else None
         )
         importance_service = (
-            ImportanceService(JevImportanceAdapter(settings))
+            ImportanceService(JevImportanceAdapter(settings, model=args.importance_model))
             if operation.includes_importance
             else None
         )
         relevance_service = (
-            RelevanceService(JevRelevanceAdapter(settings))
+            RelevanceService(JevRelevanceAdapter(settings, model=args.relevance_model))
             if operation.includes_relevance
             else None
         )
