@@ -17,23 +17,25 @@ apply_extracted_entities(feed_item, source.type)
 Из каталога `backend`:
 
 ```sh
-uv run python -m app.processing.extractors
+uv run python -m app.processing.extractors.cli
 ```
+
+Прежний запуск пакета `python -m app.processing.extractors` оставлен как совместимый делегат.
 
 По умолчанию CLI открывает БД тем же `get_engine()` и настройками приложения. Нужен доступный PostgreSQL согласно локальной конфигурации приложения. CLI выводит не более 20 последних `FeedItem` со статусом `processing_status=normalized`, источник и заголовок; пользователь выбирает только ID. Тип источника берётся из связанной записи `Source.type`. Pending, failed и любые записи без статуса `normalized` не выдаются за нормализованные и не доступны для выбора. При пустой выборке CLI сообщает, что проверять нечего.
 
 Для воспроизводимого запуска без выбора по списку можно передать ID:
 
 ```sh
-uv run python -m app.processing.extractors --item-id 123
+uv run python -m app.processing.extractors.cli --item-id 123
 ```
 
-Нечисловой, отсутствующий или ещё не нормализованный ID завершается сообщением на русском и ненулевым кодом. После выбора CLI отдельно показывает фактические входы извлечения (`source_type`, `title`, `body_text`, `raw_payload`, `original_url`) и JSON-результат. `original_url` показан также для проверки фильтрации self-link. Режим БД выполняет только `SELECT`: не вызывает normalizer, collector или `apply_extracted_entities`, не меняет ORM-поля, не делает flush/commit и не выполняет сетевых запросов; сессия закрывается без commit. Для сохранения результата приложение вызывает `apply_extracted_entities` в своём слое и управляет транзакцией самостоятельно.
+Нечисловой, отсутствующий или ещё не нормализованный ID завершается сообщением на русском и ненулевым кодом. Известные SQLSTATE/errno позволяют показать безопасную типовую подсказку для ошибок БД; сырые сообщения драйвера, DSN, SQL и параметры не выводятся. После выбора CLI отдельно показывает фактические входы извлечения (`source_type`, `title`, `body_text`, `raw_payload`, `original_url`) и JSON-результат. `original_url` показан также для проверки фильтрации self-link. Режим БД выполняет только `SELECT`: не вызывает normalizer, collector или `apply_extracted_entities`, не меняет ORM-поля, не делает flush/commit и не выполняет сетевых запросов; сессия закрывается без commit. Для сохранения результата приложение вызывает `apply_extracted_entities` в своём слое и управляет транзакцией самостоятельно.
 
 Опциональный `--fixture` остаётся отдельным автономным режимом без БД и сети:
 
 ```sh
-uv run python -m app.processing.extractors --fixture /path/to/feed-item.json
+uv run python -m app.processing.extractors.cli --fixture /path/to/feed-item.json
 ```
 
 Fixture содержит `source_type`, `title`, `body_text` и необязательные `original_url`, `raw_payload`, например:

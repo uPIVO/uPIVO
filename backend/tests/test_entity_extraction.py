@@ -1,8 +1,11 @@
+import errno
 import json
+import socket
 
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-import app.processing.extractors.__main__ as extractor_cli
+import app.processing.extractors.__main__ as package_cli
+import app.processing.extractors.cli as extractor_cli
 from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
 from app.processing.extractors.entity_extractor import apply_extracted_entities, extract_entities
@@ -281,6 +284,10 @@ class _FakeSession:
         self.flush_calls += 1
 
 
+def test_package_entrypoint_delegates_to_canonical_cli():
+    assert package_cli.main is extractor_cli.main
+
+
 def test_fixture_cli_is_explicit_offline_mode_and_displays_inputs(tmp_path, capsys, monkeypatch):
     fixture = tmp_path / "feed-item.json"
     fixture.write_text(
@@ -419,11 +426,92 @@ def test_cli_handles_empty_normalized_list_and_database_errors(monkeypatch, caps
     assert empty_session.no_autoflush_calls == 1
     assert empty_session.close_calls == 1
 
-    failed_session = _FakeSession(error=SQLAlchemyError("database unavailable"))
+    failed_session = _FakeSession(error=SQLAlchemyError("sensitive-driver-detail"))
     monkeypatch.setattr(extractor_cli, "_open_session", lambda: failed_session)
     assert extractor_cli.main(["--item-id", "1"]) == 1
-    assert "ошибка чтения" in capsys.readouterr().err.lower()
+    error_output = capsys.readouterr().err.lower()
+    assert "ошибка чтения" in error_output
+    assert "проверьте доступность базы данных" in error_output
+    assert "sensitive-driver-detail" not in error_output
     assert failed_session.no_autoflush_calls == 1
     assert failed_session.close_calls == 1
     assert failed_session.commit_calls == 0
     assert failed_session.flush_calls == 0
+
+
+def test_cli_database_auth_error_is_actionable_and_redacted(monkeypatch, capsys):
+    class DriverAuthenticationError(Exception):
+        sqlstate = "28P01"
+
+        def __str__(self):
+            return "postgresql://user:driver-secret@db.internal/private"
+
+    error = OperationalError(
+        "SELECT 'statement-secret'",
+        {"password": "parameter-secret"},
+        DriverAuthenticationError(),
+    )
+    session = _FakeSession(error=error)
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+
+    assert extractor_cli.main(["--item-id", "1"]) == 1
+
+    error_output = capsys.readouterr().err.lower()
+    assert "аутентификац" in error_output
+    for secret in (
+        "driver-secret",
+        "parameter-secret",
+        "statement-secret",
+        "db.internal",
+    ):
+        assert secret not in error_output
+
+
+def test_cli_database_connection_error_uses_errno_hint_without_driver_text(
+    monkeypatch, capsys
+):
+    error = OperationalError(
+        "SELECT 'statement-secret'",
+        {"password": "parameter-secret"},
+        ConnectionRefusedError(errno.ECONNREFUSED, "refusal-secret"),
+    )
+    session = _FakeSession(error=error)
+    monkeypatch.setattr(extractor_cli, "_open_session", lambda: session)
+
+    assert extractor_cli.main(["--item-id", "1"]) == 1
+
+    error_output = capsys.readouterr().err.lower()
+    assert "соединение отклонено" in error_output
+    assert "проверьте, что postgresql запущен" in error_output
+    assert "refusal-secret" not in error_output
+    assert "parameter-secret" not in error_output
+    assert "statement-secret" not in error_output
+
+
+def test_database_error_hints_cover_missing_database_and_dns_without_details():
+    class DriverMissingDatabaseError(Exception):
+        sqlstate = "3D000"
+
+        def __str__(self):
+            return "catalog credential-secret"
+
+    missing_database = OperationalError(
+        "SELECT 'statement-secret'",
+        {"password": "parameter-secret"},
+        DriverMissingDatabaseError(),
+    )
+    missing_hint = extractor_cli._database_error_hint(missing_database).lower()
+    assert "база данных не найдена" in missing_hint
+    assert "credential-secret" not in missing_hint
+    assert "statement-secret" not in missing_hint
+    assert "parameter-secret" not in missing_hint
+
+    dns_error = OperationalError(
+        "SELECT 'statement-secret'",
+        {"password": "parameter-secret"},
+        socket.gaierror(socket.EAI_NONAME, "dns-secret"),
+    )
+    dns_hint = extractor_cli._database_error_hint(dns_error).lower()
+    assert "не удалось разрешить имя сервера" in dns_hint
+    assert "dns-secret" not in dns_hint
+    assert "parameter-secret" not in dns_hint
