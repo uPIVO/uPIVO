@@ -571,13 +571,18 @@ def _text_mentions(text: str, source_type: SourceType) -> Iterable[str]:
                     text[end].isalnum() or text[end] in "._-"
                 ):
                     end += 1
+                candidate_end = end
+                while end > start and text[end - 1] == ".":
+                    end -= 1
                 username = text[start:end]
                 valid_username = re.fullmatch(r"[A-Za-z0-9_-]{3,20}", username) is not None
-                if end < len(text) and (text[end].isalnum() or text[end] in "._-/"):
+                if candidate_end < len(text) and (
+                    text[candidate_end].isalnum() or text[candidate_end] in "._-/"
+                ):
                     valid_username = False
                 if valid_username:
                     yield f"u/{username}"
-                    index = end
+                    index = candidate_end
                     continue
         index += 1
 

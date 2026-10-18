@@ -157,11 +157,19 @@ def test_markdown_html_urls_and_tool_domain_boundaries_and_path_precedence():
     assert extract_entities(_item(body_text="GitHub Copilot"), SourceType.WEBSITE)["tools"] == []
 
 
+def test_reddit_mentions_allow_trailing_sentence_periods_without_partial_dotted_names():
+    item = _item(body_text="u/alice. u/bobby, u/invalid.name u/pytest.fixture")
+
+    result = extract_entities(item, SourceType.REDDIT)
+
+    assert result["mentions"] == ["u/alice", "u/bobby"]
+
+
 def test_code_markup_is_ignored_without_losing_real_mentions_and_urls():
     item = _item(
         body_text=(
             "#видимый @real_user u/real_user u/invalid.name "
-            "u/pytest.fixture(scope='module') u/x u/this_username_is_over_twenty "
+            "u/pytest.fixture(scope='module') u/x u/this_username_is_over_twenty u/Алиса "
             "`@inline u/inline_user github.com/inline context.client`\n"
             "```python\n"
             "u/pytest.fixture(scope='module')\n"
