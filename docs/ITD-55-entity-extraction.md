@@ -1,0 +1,66 @@
+# Извлечение сущностей из FeedItem
+
+`app.processing.extractors.entity_extractor.extract_entities(item, source_type)` — чистый синхронный извлекатель уже нормализованного `FeedItem`. Функция возвращает JSON-совместимый объект `hashtags`, `mentions`, `urls`, `tools`, `has_media`, `media_types`; не изменяет item, не использует сеть, БД или AI.
+
+```python
+from app.processing.extractors.entity_extractor import apply_extracted_entities
+
+# feed_item уже загружен вызывающим слоем; source.type передаётся явно.
+apply_extracted_entities(feed_item, source.type)
+# Транзакцию, flush и commit выполняет вызывающий код.
+```
+
+`apply_extracted_entities` присваивает только `FeedItem.extracted_entities`. Повторный явный вызов вычисляет тот же результат при неизменных входных данных. Самостоятельных вызовов из normalizer/connectors/pipeline нет.
+
+## Локальная проверка
+
+Из каталога `backend`:
+
+```sh
+uv run python -m app.processing.extractors.cli
+```
+
+Прежний запуск пакета `python -m app.processing.extractors` оставлен как совместимый делегат.
+
+По умолчанию CLI открывает БД тем же `get_engine()` и настройками приложения. Нужен доступный PostgreSQL согласно локальной конфигурации приложения. CLI выводит не более 20 последних `FeedItem` со статусом `processing_status=normalized`, источник и заголовок; пользователь выбирает только ID. Тип источника берётся из связанной записи `Source.type`. Pending, failed и любые записи без статуса `normalized` не выдаются за нормализованные и не доступны для выбора. При пустой выборке CLI сообщает, что проверять нечего.
+
+Для воспроизводимого запуска без выбора по списку можно передать ID:
+
+```sh
+uv run python -m app.processing.extractors.cli --item-id 123
+```
+
+Нечисловой, отсутствующий или ещё не нормализованный ID завершается сообщением на русском и ненулевым кодом. Известные SQLSTATE/errno позволяют показать безопасную типовую подсказку для ошибок БД; сырые сообщения драйвера, DSN, SQL и параметры не выводятся. После выбора CLI отдельно показывает фактические входы извлечения (`source_type`, `title`, `body_text`, `raw_payload`, `original_url`) и JSON-результат. `original_url` показан также для проверки фильтрации self-link. Режим БД выполняет только `SELECT`: не вызывает normalizer, collector или `apply_extracted_entities`, не меняет ORM-поля, не делает flush/commit и не выполняет сетевых запросов; сессия закрывается без commit. Для сохранения результата приложение вызывает `apply_extracted_entities` в своём слое и управляет транзакцией самостоятельно.
+
+Опциональный `--fixture` остаётся отдельным автономным режимом без БД и сети:
+
+```sh
+uv run python -m app.processing.extractors.cli --fixture /path/to/feed-item.json
+```
+
+Fixture содержит `source_type`, `title`, `body_text` и необязательные `original_url`, `raw_payload`, например:
+
+```json
+{
+  "source_type": "youtube",
+  "title": "Обзор #AI",
+  "body_text": "Описание и ссылка https://example.org",
+  "raw_payload": {
+    "kind": "youtube_rss_entry",
+    "video_id": "dQw4w9WgXcQ",
+    "description": "Дополнительный текст"
+  }
+}
+```
+
+## Извлекаемые признаки и ограничения
+
+- Поиск текста идёт в порядке `title`, `body_text`; для YouTube дополнительно проверяются `description` и `transcript`. Повторы сохраняют первое появление.
+- Хештеги поддерживают Unicode; нормализуются в NFC и `casefold`, маркер `#` не сохраняется. Упоминания сохраняют `@` или Reddit-синтаксис `u/`; Reddit-имя принимается только в ASCII-формате длиной 3–20 символов `[A-Za-z0-9_-]` (точка и частичное совпадение некорректного имени не допускаются). Сравнение/дедупликация регистронезависимы, остаётся написание первого появления. `r/subreddit` и email-адреса не считаются упоминаниями.
+- Внутристрочные и fenced Markdown code spans, а также содержимое HTML `<code>`/`<pre>` исключены из поиска сущностей; текстовые метки ссылок остаются доступными. Inline Markdown destinations разбираются отдельно от меток: URL-метка и совпадающий target дают один URL, относительный `#fragment` в target не становится хештегом. Поддерживается обычная форма `[метка](target)` с URL в круглых или угловых скобках.
+- URL из обычного текста, Markdown и HTML распознаются без загрузки/сетевых запросов. Принимаются явные HTTP(S), `www.` и bare-домены из словаря распознаваемых инструментов; произвольные dotted identifiers (например, `client.create`) не угадываются как домены. Завершающая пунктуация удаляется. Явные верхнеуровневые списки `hashtags`, `mentions`, `urls` учитываются только при подходящих строковых значениях.
+- Для Reddit учитываются внешние `url` и `url_overridden_by_dest`, если это не permalink самого поста. `is_video`, `post_hint`, известные `media`/`secure_media.reddit_video`, `oembed` и `gallery_data` позволяют определить присутствующие типы; `is_video=false` само по себе не доказывает отсутствие любого медиа.
+- Для YouTube корректный 11-символьный `video_id` при `SourceType.YOUTUBE` явно означает `has_media=true`, `media_types=["video"]`. `link` публикации и `thumbnail_url` не становятся упомянутыми URL.
+- Telegram и Habr сейчас не сохраняют достаточно метаданных вложений: без явного сигнала `has_media=null`, `media_types=[]`. У Habr `tags`/`hubs` не переносятся в `hashtags`; текстовые `#теги` извлекаются как обычно.
+- При отсутствующем, пустом или неожиданном `raw_payload` извлечение продолжается по нормализованному тексту. Оригинальная ссылка FeedItem не добавляется автоматически, но явная ссылка из текста сохраняется.
+- `tools` определяются только по извлечённым URL, не по текстовым названиям продуктов и не по URL самой публикации. Справочник адаптирован из [Siftly `rawjson-extractor.ts`](https://github.com/viperrcrypto/Siftly/blob/main/lib/rawjson-extractor.ts); для него сохранена лицензия MIT в `backend/app/processing/extractors/SIFTLY-LICENSE.txt`. Хост сопоставляется точно или по границе поддомена; path-specific правило GitHub Copilot проверяется до общего GitHub.
