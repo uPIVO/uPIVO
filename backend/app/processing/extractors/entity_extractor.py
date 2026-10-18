@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
@@ -136,7 +137,8 @@ _TOOL_DOMAINS: dict[str, str] = {
     "defillama.com": "DefiLlama",
 }
 
-# В Siftly правило пути терялось при извлечении только hostname.
+# В Siftly правило пути терялось при извлечении
+# только hostname.
 _PATH_TOOL_RULES: tuple[tuple[str, str, str], ...] = (
     ("github.com", "/features/copilot", "GitHub Copilot"),
 )
@@ -196,7 +198,8 @@ def extract_entities(item: FeedItem, source_type: SourceType) -> ExtractedEntiti
         )
         _extend_urls(urls, url_keys, _text_urls(text))
 
-    # Учитываются явные списки; поля Habr `tags` и `hubs` не являются хештегами.
+    # Учитываются явные списки; поля Habr `tags` и `hubs`
+    # отдельно не являются хештегами.
     for value in _strings(raw_payload.get("hashtags")):
         _extend_unique(hashtags, hashtag_keys, _text_hashtags(value), key=str.casefold)
         tag = _explicit_hashtag(value)
@@ -272,8 +275,12 @@ def apply_extracted_entities(item: FeedItem, source_type: SourceType) -> Extract
 
 
 def _text_hashtags(text: str) -> Iterable[str]:
+    url_spans = tuple((match.start(), match.end()) for match in _URL_RE.finditer(text))
     index = 0
     while index < len(text):
+        if _inside_spans(index, url_spans):
+            index += 1
+            continue
         if text[index] != "#" or (index > 0 and _is_word_or_mark(text[index - 1])):
             index += 1
             continue
@@ -359,17 +366,50 @@ def _normalize_url(value: str) -> str | None:
     try:
         parsed = urlsplit(candidate)
         hostname = parsed.hostname
-        _ = parsed.port  # Validate the port, including its range.
+        _ = parsed.port  # Проверить диапазон порта.
     except ValueError:
         return None
     if (
         parsed.scheme.casefold() not in {"http", "https"}
         or not hostname
+        or not _valid_hostname(hostname)
         or any(character.isspace() or ord(character) < 32 for character in candidate)
     ):
         return None
     return urlunsplit(
         (parsed.scheme.casefold(), parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
+def _valid_hostname(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        if ":" in hostname:
+            return False
+
+    domain = hostname[:-1] if hostname.endswith(".") else hostname
+    if not domain:
+        return False
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_domain) > 253:
+        return False
+
+    labels = ascii_domain.split(".")
+    return all(
+        label
+        and len(label) <= 63
+        and label[0].isalnum()
+        and label[-1].isalnum()
+        and all(
+            character.isascii() and (character.isalnum() or character == "-")
+            for character in label
+        )
+        for label in labels
     )
 
 

@@ -153,6 +153,32 @@ def test_markdown_html_urls_and_tool_domain_boundaries_and_path_precedence():
     assert extract_entities(_item(body_text="GitHub Copilot"), SourceType.WEBSITE)["tools"] == []
 
 
+def test_url_fragments_are_not_hashtags_and_invalid_hosts_are_rejected():
+    item = _item(
+        body_text=(
+            "Ссылка https://example.org/page#section "
+            "и https://example.org/page/#fragment и #обычный; "
+            "https://-bad.example/path https://bad_host.example/path "
+            "https://example..org/path https://bad-.example/path "
+            "https://-github.com/path https://example!.org/path "
+            "https://bücher.example/a(b). https://example.com/a(b). "
+            "https://[2001:db8::1]/path"
+        )
+    )
+
+    result = extract_entities(item, SourceType.WEBSITE)
+
+    assert result["hashtags"] == ["обычный"]
+    assert result["urls"] == [
+        "https://example.org/page#section",
+        "https://example.org/page/#fragment",
+        "https://bücher.example/a(b)",
+        "https://example.com/a(b)",
+        "https://[2001:db8::1]/path",
+    ]
+    assert result["tools"] == []
+
+
 def test_empty_or_malformed_payload_keeps_text_extraction_and_explicit_lists_are_supported():
     item = _item(
         title="#Title",
