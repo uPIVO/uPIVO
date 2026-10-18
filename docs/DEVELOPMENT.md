@@ -191,3 +191,34 @@ uv run python -m app.clustering --dry-run
 Печать: id кластера, id primary, заголовки, пометка `exact` или `similar`.
 `--dry-run` не пишет строки. Пустая лента — `clusters=0`. Неверный fixture — код 2,
 ошибка БД — код 1.
+
+## Конвейер публикаций
+
+Один запуск для пользователя, у которого источники уже включены: сбор сырья,
+нормализация pending `feed_items`, склейка в `content_clusters` / `cluster_items`.
+Этапы не переписываются, вызываются как есть. Нормализация и склейка смотрят
+на общую ленту `feed_items`, как отдельные команды `app.processing` и
+`app.clustering`, а не только на строки этого пользователя. Повторный запуск
+идемпотентен: сбор обновляет те же `external_id`, нормализация берёт только
+`pending`, склейка обновляет уже существующие кластеры. Нет включённых
+источников — сбор не вызывается, нормализация и склейка общей ленты всё равно
+выполняются.
+
+Не входит в этот запуск: LLM summary, importance, digest, ранжирование ленты,
+HTTP API, frontend, Celery Beat. После склейки в коде оставлено место для
+будущего summary, вызова нет.
+
+Нужны PostgreSQL и `alembic upgrade head`. Пользователь и `user_sources` —
+как для `python -m app.services --user`. Из `backend/`:
+
+```bash
+uv run python -m app.pipeline --user demo@example.com
+uv run python -m app.pipeline --user 1 --limit 5
+uv run python -m app.pipeline --user 1 --dry-run
+uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
+```
+
+`--dry-run` не опрашивает источники и откатывает нормализацию и склейку.
+`--fixture` гоняет те же чистые шаги без базы. Неизвестный пользователь — код 2.
+Ошибка сбора — код 1, после того как pending-строки уже нормализованы и склеены.
+Нет `--user` и нет `--fixture` — код 2.
