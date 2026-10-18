@@ -70,11 +70,14 @@ Upivo → LLM Adapter → конкретный provider. Protocol в `app/ai/bas
 ## Границы кода
 
 - `api`: HTTP-маршруты: `/health`, `/health/db`, предпросмотр, сохранение и
-  просмотр сохранённых статей Habr.
+  просмотр сохранённых статей Habr. Источники и темы:
+  `/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`.
+  Авторизации нет: в пути передаётся `users.id`.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` и состояния
-  синхронизации Telegram и Reddit.
+- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `Folder` /
+  `FeedItemFolder` и состояния синхронизации Telegram и Reddit.
+  Папка — тема общей ленты, не копия публикаций и не избранное.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: сбор активных общих источников (`python -m app.services`),
   выборка результата для пользователя (`--user`) и сохранение
