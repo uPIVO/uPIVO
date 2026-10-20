@@ -151,12 +151,13 @@ def test_sync_source_delegates_to_habr_service(monkeypatch):
         def __init__(self, session):
             calls.append(session)
 
-        async def sync_publications(self):
+        async def sync_publications(self, limit=None):
+            calls.append(limit)
             return SimpleNamespace(fetched=5, saved=2)
 
     monkeypatch.setattr(source_sync, "HabrService", FakeHabrService)
-    result = asyncio.run(source_sync.sync_source(30, session_factory=factory))
-    assert calls == [sessions[-1]]
+    result = asyncio.run(source_sync.sync_source(30, session_factory=factory, limit=3))
+    assert calls == [sessions[-1], 3]
     assert result == SourceSyncResult(
         source_id=30, source_type="habr", status="collected",
         fetched=5, saved=2, inserted=2, updated=0,
