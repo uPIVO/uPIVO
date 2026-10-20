@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.connectors.habr.client import HabrClient
 from app.models.enums import SourceType
+from app.models.source import Source
 from app.services import source_sync
 from app.services.source_sync import SourceSyncResult
 
@@ -200,3 +201,59 @@ def test_sync_source_delegates_to_telegram_service(monkeypatch):
     assert result == SourceSyncResult(
         source_id=40, source_type="telegram", status="collected", fetched=3, saved=3,
     )
+
+
+def test_telegram_source_without_external_id_keeps_user_link_source(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE sources (id INTEGER PRIMARY KEY, type TEXT NOT NULL, "
+                "name TEXT NOT NULL, canonical_url TEXT NOT NULL, external_id TEXT, "
+                "last_synced_at DATETIME, created_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sources (id, type, name, canonical_url) VALUES "
+                "(40, 'telegram', 'Pending channel', 'https://t.me/example_channel')"
+            )
+        )
+    factory = sessionmaker(bind=engine)
+    channel = object()
+
+    class FakeTelegramConnector:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def resolve_channel(self, url):
+            assert url == "https://t.me/example_channel"
+            return channel
+
+    async def fake_sync(given_channel, connector, given_factory, *, limit):
+        assert given_channel is channel and given_factory is factory and limit is None
+        with factory() as session:
+            assert session.get(Source, 40).external_id == "-10012345"
+        return 2, 7
+
+    monkeypatch.setattr(source_sync, "TelegramConnector", FakeTelegramConnector)
+    monkeypatch.setattr(
+        source_sync,
+        "map_channel",
+        lambda _: {
+            "external_id": "-10012345",
+            "canonical_url": "https://t.me/example_channel",
+            "name": "Example channel",
+        },
+    )
+    monkeypatch.setattr(source_sync, "sync_telegram_channel", fake_sync)
+
+    result = asyncio.run(source_sync.sync_source(40, session_factory=factory))
+    assert result.status == "collected" and result.source_id == 40
+    with factory() as session:
+        source = session.get(Source, 40)
+        assert source.external_id == "-10012345" and source.name == "Example channel"
+    engine.dispose()

@@ -30,7 +30,9 @@ class Digest(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
-    type: Mapped[DigestType] = mapped_column(digest_type_enum, nullable=False, server_default=text("'general'"))
+    type: Mapped[DigestType] = mapped_column(
+        digest_type_enum, nullable=False, server_default=text("'general'")
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     topic: Mapped[str | None] = mapped_column(String(255))
     summary_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -57,9 +59,12 @@ class DigestItem(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
-    digest_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("digests.id", ondelete="CASCADE"), nullable=False)
-    feed_item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("feed_items.id", ondelete="CASCADE"), nullable=False)
+    digest_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("digests.id", ondelete="CASCADE"), nullable=False
+    )
+    feed_item_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("feed_items.id", ondelete="CASCADE"), nullable=False
+    )
     included_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
     digest: Mapped["Digest"] = relationship("Digest", back_populates="items")
-

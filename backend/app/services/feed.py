@@ -1,6 +1,7 @@
 """Service for generating personalized user news feed and detailed item view."""
 
 import logging
+
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -35,9 +36,9 @@ class FeedService:
         Formulate a user-specific news feed:
         1. Select feed items from sources subscribed by the user (UserSource.enabled = true).
         2. Optional filter by source_type (e.g. habr, reddit, telegram, youtube).
-        3. Optional filter by topic / tag (searches in title, body, summary, or raw_payload tags/hubs).
+        3. Optional topic/tag filter (searches title, body, summary, raw_payload tags/hubs).
         4. Sort by publication date descending (published_at DESC, collected_at DESC).
-        5. Return items with title formatted in uppercase, summary, publication date, source info, and link.
+        5. Return uppercase title, summary, publication date, source info, and link.
         """
         # Base query joining FeedItem, Source, and UserSource
         base_query = (
@@ -156,4 +157,3 @@ class FeedService:
             tags=list(dict.fromkeys(tags)),  # Deduplicate while preserving order
             extracted_entities=feed_item.extracted_entities,
         )
-

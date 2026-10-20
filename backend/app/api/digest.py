@@ -28,12 +28,13 @@ logger = logging.getLogger(__name__)
 )
 def generate_digest(
     request: DigestCreateRequest,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Генерирует дайджест за выбранный период (по умолчанию 24 часа):
     - Тип: общий (`general`) или тематический (`topic`).
-    - Исключает дубли, которые уже попадали в предыдущие дайджесты пользователя (если не было обновлений).
+    - Исключает дубли из прошлых дайджестов пользователя,
+      если публикация с тех пор не обновлялась.
     - Ранжирует материалы по важности (`importance_score`).
     - Формирует кликабельную плашку с названием за дату/время и сохраняет результат в БД.
     - Автоматически подчищает старые дайджесты старше 3 дней (кроме избранных).
@@ -55,9 +56,9 @@ def generate_digest(
 )
 def list_digests(
     user_id: Annotated[int, Query(description="ID пользователя", ge=1)],
+    db: Annotated[Session, Depends(get_db)],
     type: Annotated[DigestType | None, Query(description="Фильтр: general или topic")] = None,
     only_favorites: Annotated[bool, Query(description="Только сохранённые в избранное")] = False,
-    db: Session = Depends(get_db),
 ):
     """
     Возвращает список кликабельных плашек дайджестов для вкладки «Дайджесты»:
@@ -81,7 +82,7 @@ def list_digests(
 )
 def get_digest_detail(
     digest_id: int,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Возвращает полный текст дайджеста и все публикации, вошедшие в него:
@@ -105,10 +106,10 @@ def get_digest_detail(
 )
 def toggle_favorite(
     digest_id: int,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
-    Переключает флаг избранного. 
+    Переключает флаг избранного.
     Дайджесты в избранном НЕ удаляются по истечении 3 дней.
     """
     service = DigestService(db)
@@ -118,6 +119,9 @@ def toggle_favorite(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Дайджест с ID {digest_id} не найден",
         )
-    msg = "Дайджест сохранён в избранное и не будет удален через 3 дня" if is_fav else "Дайджест удалён из избранного"
+    msg = (
+        "Дайджест сохранён в избранное и не будет удален через 3 дня"
+        if is_fav
+        else "Дайджест удалён из избранного"
+    )
     return DigestToggleFavoriteResponse(id=digest_id, is_favorite=is_fav, message=msg)
-

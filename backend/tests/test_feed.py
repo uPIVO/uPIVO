@@ -1,5 +1,5 @@
-from datetime import datetime
 import json
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,6 +71,7 @@ def sqlite_engine():
                 "  content_hash TEXT,"
                 "  summary TEXT,"
                 "  importance_score REAL,"
+                "  ai_metadata TEXT,"
                 "  processing_status TEXT DEFAULT 'pending',"
                 "  created_at DATETIME,"
                 "  updated_at DATETIME"
@@ -80,7 +81,10 @@ def sqlite_engine():
 
         # Users
         conn.execute(
-            text("INSERT INTO users (id, email, password_hash) VALUES (1, 'u1@test.com', 'h1'), (2, 'u2@test.com', 'h2')")
+            text(
+                "INSERT INTO users (id, email, password_hash) VALUES "
+                "(1, 'u1@test.com', 'h1'), (2, 'u2@test.com', 'h2')"
+            )
         )
 
         # Sources
@@ -97,7 +101,7 @@ def sqlite_engine():
             text(
                 "INSERT INTO user_sources (id, user_id, source_id, enabled) VALUES "
                 "(1, 1, 1, 1), "  # user 1 -> Habr
-                "(2, 2, 2, 1)"   # user 2 -> Reddit
+                "(2, 2, 2, 1)"  # user 2 -> Reddit
             )
         )
 
@@ -109,10 +113,15 @@ def sqlite_engine():
         conn.execute(
             text(
                 "INSERT INTO feed_items ("
-                "  id, source_id, external_id, title, body_text, original_url, published_at, collected_at, summary, raw_payload"
+                "  id, source_id, external_id, title, body_text, original_url, "
+                "published_at, collected_at, summary, raw_payload"
                 ") VALUES "
-                "  (101, 1, 'habr:1', 'Новая версия Python вышла', 'Текст про релиз Python...', 'https://habr.com/101', :pub1, :col1, 'Краткая сводка: вышел Python с улучшениями.', :p_habr), "
-                "  (102, 2, 'reddit:1', 'Новые игры 2026 года и анонсы', 'Полный текст про игры осени 2026 года...', 'https://reddit.com/102', :pub2, :col2, NULL, :p_red)"
+                "  (101, 1, 'habr:1', 'Новая версия Python вышла', "
+                "'Текст про релиз Python...', 'https://habr.com/101', :pub1, :col1, "
+                "'Краткая сводка: вышел Python с улучшениями.', :p_habr), "
+                "  (102, 2, 'reddit:1', 'Новые игры 2026 года и анонсы', "
+                "'Полный текст про игры осени 2026 года...', 'https://reddit.com/102', "
+                ":pub2, :col2, NULL, :p_red)"
             ),
             {
                 "pub1": now,

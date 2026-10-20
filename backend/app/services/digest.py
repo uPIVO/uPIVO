@@ -1,7 +1,7 @@
 """Service for generating, retrieving, cleaning up, and favoriting user digests."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -40,7 +40,7 @@ class DigestService:
         # Автоматическая очистка просроченных (> 3 дней не избранных)
         self.cleanup_expired_digests(days=3)
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         period_start = now - timedelta(hours=request.period_hours)
         period_end = now
 
@@ -105,7 +105,7 @@ class DigestService:
         for feed_item, source in candidates:
             if feed_item.id in previously_included:
                 last_seen_update = previously_included[feed_item.id]
-                # Если пост не имеет updated_at или не обновился со времени включения в прошлый дайджест - пропускаем дубль
+                # Пропускаем пост без updated_at или без обновлений после прошлого дайджеста.
                 if not feed_item.updated_at:
                     continue
                 if last_seen_update and feed_item.updated_at <= last_seen_update:
@@ -232,7 +232,7 @@ class DigestService:
 
     def cleanup_expired_digests(self, days: int = 3) -> int:
         """Удаляет дайджесты старше указанного количества дней (кроме сохранённых в избранное)."""
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
         statement = delete(Digest).where(
             Digest.created_at < cutoff,
             Digest.is_favorite.is_(False),
@@ -251,7 +251,10 @@ class DigestService:
         """Сборка структурированного текста дайджеста из отобранных материалов."""
         if not items:
             topic_hint = f" по теме «{topic}»" if topic else ""
-            return f"{title}\n\nЗа прошедший период новых значимых публикаций{topic_hint} в ваших источниках не обнаружено."
+            return (
+                f"{title}\n\nЗа прошедший период новых значимых публикаций{topic_hint} "
+                "в ваших источниках не обнаружено."
+            )
 
         lines = [
             f"### {title}",
@@ -268,7 +271,8 @@ class DigestService:
                 else ""
             )
             lines.append(
-                f"{idx}. **{post_title}** ({source.name}){score_badge}\n   {summary}\n   [Читать далее]({feed_item.original_url})"
+                f"{idx}. **{post_title}** ({source.name}){score_badge}\n"
+                f"   {summary}\n   [Читать далее]({feed_item.original_url})"
             )
 
         return "\n\n".join(lines)
@@ -314,4 +318,3 @@ class DigestService:
             created_at=digest.created_at,
             items=feed_items_list,
         )
-

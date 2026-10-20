@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,6 +71,7 @@ def sqlite_engine():
                 "  content_hash TEXT,"
                 "  summary TEXT,"
                 "  importance_score REAL,"
+                "  ai_metadata TEXT,"
                 "  processing_status TEXT DEFAULT 'pending',"
                 "  created_at DATETIME,"
                 "  updated_at DATETIME"
@@ -129,17 +130,23 @@ def sqlite_engine():
         )
 
         # 4. Feed Items (опубликованы 2 часа назад)
-        two_hours_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)
+        two_hours_ago = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
         payload1 = json.dumps({"tags": ["python", "ai"], "hubs": ["Разработка"]})
         payload2 = json.dumps({"tags": ["игры", "gamedev"], "hubs": ["Игры"]})
 
         conn.execute(
             text(
                 "INSERT INTO feed_items ("
-                "  id, source_id, external_id, title, body_text, original_url, published_at, collected_at, summary, raw_payload, importance_score, updated_at"
+                "  id, source_id, external_id, title, body_text, original_url, "
+                "published_at, collected_at, summary, raw_payload, "
+                "importance_score, updated_at"
                 ") VALUES "
-                "  (101, 1, 'habr:1', 'Релиз Python 3.13 с новыми фичами', 'Полный текст про Python...', 'https://habr.com/101', :t1, :t1, 'Саммари релиза Python', :p1, 9.5, NULL), "
-                "  (102, 2, 'reddit:1', 'Анонс новой игры осени', 'Полный текст про игры...', 'https://reddit.com/102', :t2, :t2, 'Саммари про игры', :p2, 8.0, NULL)"
+                "  (101, 1, 'habr:1', 'Релиз Python 3.13 с новыми фичами', "
+                "'Полный текст про Python...', 'https://habr.com/101', :t1, :t1, "
+                "'Саммари релиза Python', :p1, 9.5, NULL), "
+                "  (102, 2, 'reddit:1', 'Анонс новой игры осени', "
+                "'Полный текст про игры...', 'https://reddit.com/102', :t2, :t2, "
+                "'Саммари про игры', :p2, 8.0, NULL)"
             ),
             {
                 "t1": two_hours_ago,
@@ -198,7 +205,7 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
 
     # 3. Обновляем пост 101 (симулируем апдейт статьи)
     with sqlite_engine.begin() as conn:
-        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+        now_dt = datetime.now(UTC).replace(tzinfo=None)
         conn.execute(
             text("UPDATE feed_items SET updated_at = :upd WHERE id = 101"),
             {"upd": now_dt},
@@ -217,12 +224,15 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     # 4. Проверка тематического дайджеста (type="topic", topic="игры")
     # Добавим свежий пост про игры
     with sqlite_engine.begin() as conn:
-        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+        now_dt = datetime.now(UTC).replace(tzinfo=None)
         payload = json.dumps({"tags": ["игры", "steam"]})
         conn.execute(
             text(
-                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, original_url, published_at, collected_at, summary, raw_payload, importance_score) "
-                "VALUES (103, 2, 'reddit:2', 'Свежий трейлер игры', 'Текст трейлера', 'https://reddit.com/103', :t, :t, 'Саммари трейлера', :p, 7.5)"
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
+                "original_url, published_at, collected_at, summary, raw_payload, "
+                "importance_score) VALUES (103, 2, 'reddit:2', 'Свежий трейлер игры', "
+                "'Текст трейлера', 'https://reddit.com/103', :t, :t, "
+                "'Саммари трейлера', :p, 7.5)"
             ),
             {"t": now_dt, "p": payload},
         )
@@ -264,12 +274,13 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     assert res_fav.json()["is_favorite"] is True
 
     # 8. Проверка автоудаления дайджестов старше 3 дней
-    old_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=4)
+    old_time = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=4)
     with sqlite_engine.begin() as conn:
         # Создаем старый неизбранный дайджест
         conn.execute(
             text(
-                "INSERT INTO digests (id, user_id, type, title, summary_text, period_start, period_end, items_count, is_favorite, created_at) "
+                "INSERT INTO digests (id, user_id, type, title, summary_text, "
+                "period_start, period_end, items_count, is_favorite, created_at) "
                 "VALUES (999, 1, 'general', 'Очень старый дайджест', 'Текст', :t, :t, 0, 0, :t)"
             ),
             {"t": old_time},
@@ -289,4 +300,3 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     res_fav_check = client.get(f"/api/digests/{target_id}")
     assert res_fav_check.status_code == 200
     assert res_fav_check.json()["is_favorite"] is True
-

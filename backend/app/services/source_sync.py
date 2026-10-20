@@ -98,7 +98,16 @@ async def sync_source(
         if source_type is SourceType.TELEGRAM:
             async with TelegramConnector() as connector:
                 channel = await connector.resolve_channel(url)
-                if external_id != map_channel(channel)["external_id"]:
+                channel_values = map_channel(channel)
+                if external_id is None:
+                    with factory.begin() as session:
+                        source = session.get(Source, source_id, with_for_update=True)
+                        if source.external_id is None:
+                            source.external_id = channel_values["external_id"]
+                            source.canonical_url = channel_values["canonical_url"]
+                            source.name = channel_values["name"]
+                        external_id = source.external_id
+                if external_id != channel_values["external_id"]:
                     return SourceSyncResult(
                         source_id, source_type.value, "failed", reason="Telegram source ID mismatch"
                     )

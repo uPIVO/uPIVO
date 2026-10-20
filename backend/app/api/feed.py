@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 )
 def get_user_feed(
     user_id: Annotated[int, Query(description="Идентификатор пользователя", ge=1)],
+    db: Annotated[Session, Depends(get_db)],
     source_type: Annotated[
         SourceType | None,
         Query(description="Фильтр по типу источника (habr, reddit, telegram, youtube и др.)"),
@@ -38,7 +39,6 @@ def get_user_feed(
         int,
         Query(description="Смещение пагинации", ge=0),
     ] = 0,
-    db: Session = Depends(get_db),
 ):
     """
     Возвращает персонализированную новостную ленту пользователя:
@@ -66,7 +66,7 @@ def get_user_feed(
 )
 def get_feed_item_detail(
     item_id: int,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Возвращает полный развернутый пост по его ID:
@@ -83,4 +83,3 @@ def get_feed_item_detail(
             detail=f"Публикация с ID {item_id} не найдена",
         )
     return item
-

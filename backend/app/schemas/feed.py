@@ -35,7 +35,9 @@ class FeedItemDetail(BaseModel):
     original_url: str = Field(description="Оригинальный URL")
     source: SourceBrief = Field(description="Источник публикации")
     tags: list[str] = Field(default_factory=list, description="Тематические теги/хабы")
-    extracted_entities: dict[str, Any] | None = Field(default=None, description="Извлеченные сущности")
+    extracted_entities: dict[str, Any] | None = Field(
+        default=None, description="Извлеченные сущности"
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -45,4 +47,3 @@ class PaginatedFeedResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
