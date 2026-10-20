@@ -19,7 +19,7 @@ from app.models.enums import ProcessingStatus, processing_status_enum
 
 
 class FeedItem(Base):
-    """Shared publication row. Connectors fill raw fields; AI columns stay unused here."""
+    """Общая публикация и текущие проекции обработки контента."""
 
     __tablename__ = "feed_items"
     __table_args__ = (
@@ -45,6 +45,7 @@ class FeedItem(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64))
     summary: Mapped[str | None] = mapped_column(Text)
     importance_score: Mapped[float | None] = mapped_column(DOUBLE_PRECISION)
+    ai_metadata: Mapped[dict | None] = mapped_column(JSONB)
     processing_status: Mapped[ProcessingStatus] = mapped_column(
         processing_status_enum,
         nullable=False,
