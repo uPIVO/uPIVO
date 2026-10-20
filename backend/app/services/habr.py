@@ -22,7 +22,11 @@ class HabrService:
         self.db = db
         self.client = client or HabrClient()
 
-    async def sync_publications(self, pages: int = 1, sort: str = "date") -> HabrSyncResponse:
+    async def sync_publications(
+        self, pages: int = 1, sort: str = "date", limit: int | None = None
+    ) -> HabrSyncResponse:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1")
         source_id = self.db.scalar(
             insert(Source)
             .values(
@@ -41,12 +45,19 @@ class HabrService:
 
         fetched = saved = skipped = 0
         seen: set[str] = set()
+        remaining = limit
         for page in range(1, pages + 1):
+            if remaining == 0:
+                break
             data = await self.client.get_articles_page(page=page, sort=sort)
             article_ids = [str(article_id) for article_id in data.get("articleIds", [])]
+            if remaining is not None:
+                article_ids = article_ids[:remaining]
             if not article_ids:
                 break
             fetched += len(article_ids)
+            if remaining is not None:
+                remaining -= len(article_ids)
             existing = set(
                 self.db.scalars(
                     select(FeedItem.external_id).where(
