@@ -222,3 +222,32 @@ uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
 `--fixture` гоняет те же чистые шаги без базы. Неизвестный пользователь — код 2.
 Ошибка сбора — код 1, после того как pending-строки уже нормализованы и склеены.
 Нет `--user` и нет `--fixture` — код 2.
+## Темы и источники
+
+HTTP API управляет связями `user_sources` и тематическими папками `folders` /
+`feed_item_folders`. Авторизация в этот API не входит: в пути передаётся уже
+существующий `users.id`. Логин, JWT и OAuth здесь не добавляются.
+
+Источник общий: повторное подключение того же канала не создаёт вторую строку
+`sources`, а только связь пользователя. Выключение меняет `user_sources.enabled`
+и не удаляет источник. Для YouTube достаточно URL с id канала
+(`https://www.youtube.com/channel/UC...`); этот запрос канал не скачивает.
+Тема — папка общей ленты. В неё кладётся id публикации из `feed_items`, без копии
+материала и без избранного.
+
+Нужны PostgreSQL и `uv run alembic upgrade head`. Пользователь создаётся отдельно:
+
+```sql
+INSERT INTO users (email, password_hash)
+VALUES ('demo@example.com', 'local-dev-not-auth');
+```
+
+Из `backend/`, в другом терминале после `uv run uvicorn app.main:app --reload`:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/users/1/sources" \
+  -H "content-type: application/json" \
+  -d '{"type":"youtube","url":"https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw","name":"Google for Developers"}'
+```
+
+Неизвестный пользователь — HTTP 404. Пустой список источников или тем — `[]`.

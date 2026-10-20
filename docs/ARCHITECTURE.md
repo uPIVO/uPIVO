@@ -86,11 +86,14 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 ## Границы кода
 
 - `api`: HTTP-маршруты: `/health`, `/health/db`, предпросмотр, сохранение и
-  просмотр сохранённых статей Habr.
+  просмотр сохранённых статей Habr. Источники и темы:
+  `/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`.
+  Авторизации нет: в пути передаётся `users.id`.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
 - `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
-  `ClusterItem` и состояния синхронизации Telegram и Reddit.
+  `ClusterItem` / `Folder` / `FeedItemFolder` и состояния синхронизации Telegram и Reddit.
+  Папка — тема общей ленты, не копия публикаций и не избранное.
 - `schemas`: будущие Pydantic-схемы входа/выхода, включая FeedItem.
 - `services`: сбор активных общих источников (`python -m app.services`),
   выборка результата для пользователя (`--user`) и сохранение
