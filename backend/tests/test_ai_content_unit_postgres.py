@@ -4,6 +4,9 @@
 Обычный pytest пропускает эти проверки; API моделей не вызываются.
 """
 
+import asyncio
+import hashlib
+import json
 import os
 from uuid import uuid4
 
@@ -14,8 +17,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai.analysis_metadata import interests_input_fingerprint, summary_lineage_fingerprint
-from app.ai.dto import ImportanceResult, ImportanceWeights, RelevanceResult, SummaryResult
+from app.ai.dto import (
+    ImportanceComponents,
+    ImportanceResult,
+    ImportanceWeights,
+    RelevanceResult,
+    SummaryResult,
+)
+from app.ai.importance import ImportanceService
 from app.ai.repository import ContentUnitAnalysisRepository, FeedItemInClusterError, SaveDisposition
+from app.ai.service import RelevanceService, SummarizationService
 from app.clustering.cluster import ClusterPlan
 from app.clustering.persist import _sync_members
 from app.models import (
@@ -27,6 +38,7 @@ from app.models import (
     User,
     UserItemScore,
 )
+from app.services.analyze_feed_item import ContentUnitAnalysisUseCase
 
 _URL = os.environ.get("ITD17_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not _URL, reason="Нужна отдельная тестовая PostgreSQL")
@@ -262,3 +274,151 @@ def test_target_constraints_and_same_numeric_id_are_independent(engine):
             ).relevance_score
             == 0.9
         )
+
+
+def test_cluster_usecase_reuses_results_and_retries_changed_membership(engine):
+    sessions = []
+    with Session(engine) as session, session.begin():
+        user, items = _seed(session)
+        user_id = user.id
+        ids = [item.id for item in items]
+        cluster = ContentCluster(title="Одно событие")
+        session.add(cluster)
+        session.flush()
+        cluster_id = cluster.id
+        _sync_members(
+            session,
+            cluster_id,
+            ClusterPlan(
+                member_ids=tuple(ids[:2]),
+                primary_id=ids[0],
+                exact_ids=(),
+                title=cluster.title,
+            ),
+        )
+
+    def factory():
+        session = Session(engine)
+        sessions.append(session)
+        return session
+
+    def fingerprint(value):
+        return (
+            "v1:"
+            + hashlib.sha256(
+                json.dumps(value, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+        )
+
+    def no_open_sessions():
+        assert not any(session.in_transaction() for session in sessions)
+
+    class SummaryAdapter:
+        calls = 0
+        change_membership = False
+
+        def validate_configuration(self):
+            pass
+
+        def fingerprint_for(self, unit):
+            return fingerprint(unit.model_dump(mode="json"))
+
+        async def summarize(self, unit):
+            no_open_sessions()
+            self.calls += 1
+            result = SummaryResult(
+                summary=" ".join(item.body_text for item in unit.feed_items),
+                fingerprint=self.fingerprint_for(unit),
+                provider="fake",
+                preset="fake",
+            )
+            if self.change_membership:
+                self.change_membership = False
+                with Session(engine) as session, session.begin():
+                    session.scalar(
+                        select(ContentCluster)
+                        .where(ContentCluster.id == cluster_id)
+                        .with_for_update()
+                    )
+                    _sync_members(
+                        session,
+                        cluster_id,
+                        ClusterPlan(
+                            member_ids=tuple(ids),
+                            primary_id=ids[0],
+                            exact_ids=(),
+                            title="Одно событие",
+                        ),
+                    )
+            return result
+
+    class ImportanceAdapter:
+        calls = 0
+
+        def validate_configuration(self):
+            pass
+
+        def fingerprint_for(self, value):
+            return fingerprint(value.model_dump())
+
+        async def score_importance(self, value):
+            no_open_sessions()
+            self.calls += 1
+            return ImportanceComponents(
+                scale_score=2,
+                significance_score=2,
+                reaction_score=1,
+                fingerprint=self.fingerprint_for(value),
+                provider="fake",
+                model="fake",
+            )
+
+    class RelevanceAdapter:
+        calls = 0
+
+        def validate_configuration(self):
+            pass
+
+        def fingerprint_for(self, value):
+            return fingerprint(value.model_dump())
+
+        async def score_relevance(self, value):
+            no_open_sessions()
+            self.calls += 1
+            return RelevanceResult(
+                relevance=0.9,
+                fingerprint=self.fingerprint_for(value),
+                provider="fake",
+                model="fake",
+            )
+
+    summary, importance, relevance = SummaryAdapter(), ImportanceAdapter(), RelevanceAdapter()
+    usecase = ContentUnitAnalysisUseCase(
+        kind="cluster",
+        session_factory=factory,
+        summarization_service=SummarizationService(summary),
+        importance_service=ImportanceService(importance),
+        relevance_service=RelevanceService(relevance),
+    )
+    first = asyncio.run(usecase.run(cluster_id, user_id=user_id, interests=["тема"]))
+    second = asyncio.run(usecase.run(cluster_id, user_id=user_id, interests=["тема"]))
+    assert first.succeeded and second.succeeded
+    assert second.summary.reused and second.importance.reused and second.relevance.reused
+    assert (summary.calls, importance.calls, relevance.calls) == (1, 1, 1)
+
+    summary.change_membership = True
+    third = asyncio.run(usecase.run(cluster_id, user_id=user_id, interests=["тема"], force=True))
+    assert third.succeeded and third.attempt_count == 2
+    assert (summary.calls, importance.calls, relevance.calls) == (3, 2, 2)
+    no_open_sessions()
+    with Session(engine) as session:
+        cluster = session.get(ContentCluster, cluster_id)
+        assert cluster.summary == third.summary.result.summary
+        assert cluster.importance_score == third.importance.result.total_score
+        assert (
+            cluster.ai_metadata["summary"]["stale_candidate"]["result"]["summary"]
+            == first.summary.result.summary
+        )
+        assert all(session.get(FeedItem, item_id).summary is None for item_id in ids)
+        score = session.scalar(select(UserItemScore).where(UserItemScore.cluster_id == cluster_id))
+        assert score.relevance_score == third.relevance.result.relevance
