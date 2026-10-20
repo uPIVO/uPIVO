@@ -27,8 +27,9 @@
 
 ```text
 collection → raw_payload → normalization → status=normalized
-→ clustering (exact content_hash + title/body similarity) → content_clusters
-→ future enrichment / ranking → status=processed
+→ deterministic entity extraction → clustering (exact hash + bounded lexical similarity)
+→ standalone FeedItem or ContentCluster
+→ future cluster AI / personalized ranking → status=processed
 ```
 
 Shared ingestion: enabled `user_sources` → DISTINCT `sources` → sync source once
@@ -41,7 +42,8 @@ User layer: `User` → `UserSource` → персональная лента и �
 
 Общая модель FeedItem хранит `raw_payload JSONB` — исходные данные источника;
 `extracted_entities JSONB` предназначено для hashtags, mentions, URLs, tools/products
-и других быстро извлечённых сущностей без LLM. Извлечение доступно отдельной CLI-командой.
+и других быстро извлечённых сущностей без LLM. Извлечение входит в `app.pipeline`
+и доступно отдельной CLI-командой.
 
 Telegram API → Telethon → connectors/telegram → processing/telegram →
 services/telegram → FeedItem и курсор PostgreSQL.
@@ -61,17 +63,19 @@ original_url / author / published_at, считает `content_hash` и став�
 normalized или failed. `processed` зарезервирован для полного будущего pipeline.
 `raw_payload` не переписывается. CLI:
 `python -m app.processing`.
-`app.clustering` склеивает уже сохранённые `feed_items` в инфоповоды: одинаковый
+`app.clustering` склеивает `feed_items` со статусом `normalized` или `processed`
+в инфоповоды: одинаковый
 `content_hash` — одна история, похожие title и body_text — одна строка
 `content_clusters` плюс `cluster_items`. Публикации не удаляются. Summary не
 требуется. CLI: `python -m app.clustering`.
-`python -m app.pipeline --user` запускает сбор, нормализацию и склейку подряд
+`python -m app.pipeline --user` запускает сбор, нормализацию, извлечение сущностей
+и склейку подряд
 для включённых источников одного пользователя. Повторный запуск безопасен.
 LLM summary здесь не вызывается.
 Session-файлы Telegram хранятся локально.
 
-`processing/extractors` извлекает сущности из сохранённых публикаций отдельной
-CLI-командой; это не этап `app.pipeline`.
+`processing/extractors` извлекает сущности только из нормализованных публикаций;
+общий pipeline сохраняет результат в `extracted_entities`, не меняя `raw_payload`.
 
 Прикладные AI-сервисы используют отдельные контракты суммаризации, персональной
 релевантности и общей важности из `app/ai/base.py`. OpenRouter создаёт общую выжимку,
@@ -82,6 +86,10 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 для `FeedItem`; AI-запросы выполняются вне DB-транзакций. Репозиторий проверяет актуальность
 входа и точного текста выжимки перед записью, сохраняя устаревший ответ отдельно.
 Обработка кластеров в БД, общий Celery-конвейер и правила отбора не подключены.
+Чистая функция `services/ranking.py` задаёт provisional MVP-формулу, но её результат
+пока не сохраняется и не используется в feed/digest.
+Формула: `0.5 × relevance + 0.3 × (importance / 10) + 0.2 × freshness`,
+где freshness убывает вдвое каждые 24 часа. Веса предварительные.
 Контракты, CLI, метаданные и ограничения описаны в [документации AI](ai-summarization.md).
 
 ## Границы кода

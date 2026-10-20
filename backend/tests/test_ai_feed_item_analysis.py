@@ -138,12 +138,12 @@ def _importance_for(summary: str) -> ImportanceResult:
         provider="typesafe",
         model="jev-test",
     )
-    weights = ImportanceWeights(scale=1.0, significance=0.0, reaction=0.0)
+    weights = ImportanceWeights(scale=1.0, significance=1.0, reaction=1.0)
     return ImportanceResult(
         **components.model_dump(),
         total_score=1.0,
         weights=weights,
-        aggregation_version="content-importance-weighted-v1",
+        aggregation_version="content-importance-sum-v2",
     )
 
 

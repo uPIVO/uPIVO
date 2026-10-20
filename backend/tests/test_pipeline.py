@@ -61,7 +61,12 @@ def _patch_stages(monkeypatch, *, pending: int = 2):
         writes.append(write)
         return [], 1
 
+    def fake_extract(session):
+        order.append("extract")
+        return 0
+
     monkeypatch.setattr("app.pipeline.run.normalize_pending", fake_normalize)
+    monkeypatch.setattr("app.pipeline.run._extract_entities", fake_extract)
     monkeypatch.setattr("app.pipeline.run.cluster_feed", fake_cluster)
     return order, writes
 
@@ -78,7 +83,7 @@ def test_empty_user_skips_collect_then_normalizes_and_clusters(monkeypatch, user
     result = asyncio.run(run_pipeline("empty@example.com", session_factory=users))
     assert calls == []
     assert result.collect.outcomes == []
-    assert order == ["normalize", "cluster"]
+    assert order == ["normalize", "extract", "cluster"]
     assert writes == [True]
     assert result.normalize.processed == 0
 
@@ -98,7 +103,7 @@ def test_youtube_source_collects_then_normalizes_then_clusters(monkeypatch, user
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
     result = asyncio.run(run_pipeline("1", session_factory=users, limit=3))
     assert calls == [10]
-    assert order == ["collect", "normalize", "cluster"]
+    assert order == ["collect", "normalize", "extract", "cluster"]
     assert writes == [True]
     assert result.collect.outcomes[0].source_type == "youtube"
     assert result.collect.collected == 1
@@ -117,7 +122,10 @@ def test_rerun_calls_the_same_stages_and_second_normalize_is_idle(monkeypatch, u
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
     first = asyncio.run(run_pipeline("one@example.com", session_factory=users))
     second = asyncio.run(run_pipeline("one@example.com", session_factory=users))
-    assert order == ["collect", "normalize", "cluster", "collect", "normalize", "cluster"]
+    assert order == [
+        "collect", "normalize", "extract", "cluster",
+        "collect", "normalize", "extract", "cluster",
+    ]
     assert writes == [True, True]
     assert first.normalize.processed == 2
     assert second.normalize.processed == 0
@@ -154,7 +162,7 @@ def test_dry_run_does_not_collect_or_commit(monkeypatch, users):
 
     result = asyncio.run(run_pipeline("one@example.com", session_factory=factory, dry_run=True))
     assert calls == []
-    assert order == ["normalize", "cluster"]
+    assert order == ["normalize", "extract", "cluster"]
     assert writes == [False]
     assert result.collect.outcomes[0].reason == "dry-run"
     assert result.collect.outcomes[0].source_type == "youtube"

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TypedDict
 from urllib.parse import urlsplit, urlunsplit
 
-from app.models.enums import SourceType
+from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
 
 
@@ -280,6 +280,8 @@ def apply_extracted_entities(item: FeedItem, source_type: SourceType) -> Extract
 
     Транзакцией управляет вызывающий код.
     """
+    if item.processing_status not in (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED):
+        raise ValueError("Entity extraction requires a normalized FeedItem")
     result = extract_entities(item, source_type)
     item.extracted_entities = result
     return result

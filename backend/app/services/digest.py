@@ -7,7 +7,7 @@ from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.digest import Digest, DigestItem
-from app.models.enums import DigestType
+from app.models.enums import DigestType, ProcessingStatus
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_source import UserSource
@@ -17,6 +17,7 @@ from app.schemas.digest import (
     DigestListItem,
 )
 from app.schemas.feed import FeedItemListItem, SourceBrief
+from app.services.users import require_user
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class DigestService:
         6. Формирование саммари-сводки.
         7. Сохранение дайджеста и связей в БД.
         """
+        require_user(self.db, request.user_id)
         # Автоматическая очистка просроченных (> 3 дней не избранных)
         self.cleanup_expired_digests(days=3)
 
@@ -55,6 +57,9 @@ class DigestService:
                 & (UserSource.enabled.is_(True)),
             )
             .where(
+                FeedItem.processing_status.in_(
+                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+                ),
                 or_(
                     (FeedItem.published_at >= period_start) & (FeedItem.published_at <= period_end),
                     (FeedItem.collected_at >= period_start) & (FeedItem.collected_at <= period_end),
@@ -168,6 +173,7 @@ class DigestService:
         only_favorites: bool = False,
     ) -> list[DigestListItem]:
         """Получить список карточек/плашек дайджестов пользователя."""
+        require_user(self.db, user_id)
         query = select(Digest).where(Digest.user_id == user_id)
 
         if digest_type:
@@ -201,10 +207,11 @@ class DigestService:
             )
         return results
 
-    def get_digest_detail(self, digest_id: int) -> DigestDetailResponse | None:
-        """Получить развернутый дайджест по его ID."""
+    def get_digest_detail(self, user_id: int, digest_id: int) -> DigestDetailResponse | None:
+        """Получить только собственный дайджест пользователя."""
+        require_user(self.db, user_id)
         digest = self.db.get(Digest, digest_id)
-        if not digest:
+        if digest is None or digest.user_id != user_id:
             return None
 
         # Получаем вошедшие посты
@@ -221,10 +228,11 @@ class DigestService:
         items = self.db.execute(items_query).all()
         return self._to_detail_response(digest, items)
 
-    def toggle_favorite(self, digest_id: int) -> bool | None:
+    def toggle_favorite(self, user_id: int, digest_id: int) -> bool | None:
         """Переключить флаг избранного у дайджеста. Избранные не удаляются через 3 дня."""
+        require_user(self.db, user_id)
         digest = self.db.get(Digest, digest_id)
-        if not digest:
+        if digest is None or digest.user_id != user_id:
             return None
         digest.is_favorite = not digest.is_favorite
         self.db.commit()
@@ -283,7 +291,7 @@ class DigestService:
         """Преобразование модели Digest и связанных публикаций в DTO ответа."""
         feed_items_list: list[FeedItemListItem] = []
         for feed_item, source in items:
-            title_text = (feed_item.title or "БЕЗ НАЗВАНИЯ").strip().upper()
+            title_text = (feed_item.title or "Без названия").strip()
             summary_text = feed_item.summary
             if not summary_text:
                 raw_body = (feed_item.body_text or "").strip()

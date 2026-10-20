@@ -16,7 +16,7 @@ class SourceBrief(BaseModel):
 
 class FeedItemListItem(BaseModel):
     id: int
-    title: str = Field(description="Название поста заглавными буквами")
+    title: str = Field(description="Название поста с исходным регистром")
     summary: str = Field(description="Краткое изложение поста (саммари от ИИ или выдержка)")
     published_at: datetime | None = Field(default=None, description="Дата и время поста")
     source: SourceBrief = Field(description="Источник публикации")

@@ -5,6 +5,7 @@ sources stays one row per channel. user_sources is the per-user link.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.connectors.base import InvalidSourceError
 from app.connectors.habr.client import HabrClient
+from app.connectors.telegram.client import normalize_channel_source
+from app.connectors.telegram.errors import TelegramChannelAccessError
 from app.connectors.youtube.urls import RSS_CHANNEL_RE, canonical_channel_url, parse_channel_url
 from app.models.enums import SourceType
 from app.models.source import Source
@@ -83,6 +86,21 @@ def set_source_enabled(
     return response
 
 
+def unlink_source(session: Session, user_id: int, source_id: int) -> None:
+    """Remove only this user's link; shared source and publications remain."""
+    require_user(session, user_id)
+    link = session.scalar(
+        select(UserSource).where(
+            UserSource.user_id == user_id,
+            UserSource.source_id == source_id,
+        )
+    )
+    if link is None:
+        raise UnknownSourceLinkError(source_id)
+    session.delete(link)
+    _commit(session)
+
+
 def _identity(source_type: SourceType, url: str, name: str | None) -> _SourceIdentity:
     if source_type is SourceType.YOUTUBE:
         channel_id = _youtube_channel_id(url)
@@ -104,7 +122,29 @@ def _identity(source_type: SourceType, url: str, name: str | None) -> _SourceIde
         )
     if source_type is SourceType.REDDIT:
         try:
-            subreddit = normalize_subreddit(url)
+            reddit_input = url.strip()
+            if "://" not in reddit_input:
+                if re.fullmatch(r"/?(?:r/)?[A-Za-z0-9_]{1,21}/?", reddit_input):
+                    subreddit = normalize_subreddit(reddit_input)
+                    reddit_input = ""
+                elif reddit_input.lower().startswith(
+                    ("reddit.com/", "www.reddit.com/", "old.reddit.com/")
+                ):
+                    reddit_input = f"https://{reddit_input}"
+                else:
+                    raise ValueError("Pass a Reddit subreddit URL or name.")
+            if reddit_input:
+                parsed = urlparse(reddit_input)
+                if (
+                    parsed.scheme.lower() not in {"http", "https"}
+                    or (parsed.hostname or "").lower()
+                    not in {"reddit.com", "www.reddit.com", "old.reddit.com"}
+                    or re.fullmatch(r"/r/[A-Za-z0-9_]{1,21}/?", parsed.path) is None
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("Pass a Reddit subreddit URL or name.")
+                subreddit = normalize_subreddit(reddit_input)
         except ValueError as exc:
             raise InvalidSourceAttachError(str(exc)) from exc
         return _SourceIdentity(
@@ -112,6 +152,18 @@ def _identity(source_type: SourceType, url: str, name: str | None) -> _SourceIde
             name=_display_name(name, f"r/{subreddit}"),
             canonical_url=f"https://www.reddit.com/r/{subreddit}/",
             external_id=subreddit,
+        )
+    if source_type is SourceType.TELEGRAM:
+        try:
+            channel = normalize_channel_source(url)
+        except TelegramChannelAccessError as exc:
+            raise InvalidSourceAttachError(str(exc)) from exc
+        canonical = str(channel) if isinstance(channel, int) else f"https://t.me/{channel.lower()}"
+        return _SourceIdentity(
+            type=source_type,
+            name=_display_name(name, str(channel)),
+            canonical_url=canonical,
+            external_id=None,
         )
     canonical = _normalize_http_url(url)
     return _SourceIdentity(

@@ -15,8 +15,8 @@ from app.ai.dto import (
     ImportanceWeights,
 )
 
-IMPORTANCE_AGGREGATION_VERSION = "content-importance-weighted-v1"
-IMPORTANCE_WEIGHTS = ImportanceWeights(scale=0.5, significance=1.0, reaction=1.0)
+IMPORTANCE_AGGREGATION_VERSION = "content-importance-sum-v2"
+IMPORTANCE_WEIGHTS = ImportanceWeights(scale=1.0, significance=1.0, reaction=1.0)
 
 
 class ImportanceService:

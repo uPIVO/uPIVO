@@ -29,6 +29,7 @@ from app.ai.dto import (
     RelevanceResult,
     SummaryResult,
 )
+from app.ai.importance import IMPORTANCE_AGGREGATION_VERSION, IMPORTANCE_WEIGHTS
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_item_score import UserItemScore
@@ -420,6 +421,8 @@ class FeedItemAnalysisRepository:
             or last_good.status != "current"
             or last_good.input_fingerprint != loaded.input_fingerprint
             or last_good.summary_lineage_fingerprint != summary_lineage_fingerprint(summary)
+            or last_good.result.aggregation_version != IMPORTANCE_AGGREGATION_VERSION
+            or last_good.result.weights != IMPORTANCE_WEIGHTS
             or loaded.row.importance_score != last_good.result.total_score
         ):
             return None

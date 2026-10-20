@@ -36,6 +36,13 @@ class ClusterItem(Base):
     __table_args__ = (
         UniqueConstraint("cluster_id", "feed_item_id", name="uq_cluster_items_cluster_feed"),
         Index("idx_cluster_items_feed_item_id", "feed_item_id"),
+        Index("uq_cluster_items_feed_item_id", "feed_item_id", unique=True),
+        Index(
+            "uq_cluster_items_primary_per_cluster",
+            "cluster_id",
+            unique=True,
+            postgresql_where=text("is_primary = true"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)

@@ -132,6 +132,7 @@ def sqlite_engine():
                 "p_red": payload_reddit,
             },
         )
+        conn.execute(text("UPDATE feed_items SET processing_status = 'normalized'"))
 
     yield engine
     engine.dispose()
@@ -161,8 +162,7 @@ def test_personalized_feed_and_detail(client: TestClient):
     data1 = res1.json()
     assert data1["total"] == 1
     post1 = data1["items"][0]
-    # Название заглавными буквами
-    assert post1["title"] == "НОВАЯ ВЕРСИЯ PYTHON ВЫШЛА"
+    assert post1["title"] == "Новая версия Python вышла"
     # AI Саммари
     assert post1["summary"] == "Краткая сводка: вышел Python с улучшениями."
     assert post1["source"]["type"] == "habr"
@@ -174,8 +174,7 @@ def test_personalized_feed_and_detail(client: TestClient):
     data2 = res2.json()
     assert data2["total"] == 1
     post2 = data2["items"][0]
-    # Заглавные буквы
-    assert post2["title"] == "НОВЫЕ ИГРЫ 2026 ГОДА И АНОНСЫ"
+    assert post2["title"] == "Новые игры 2026 года и анонсы"
     # Fallback из body_text так как summary=None
     assert post2["summary"].startswith("Полный текст про игры")
     assert post2["source"]["type"] == "reddit"
@@ -200,7 +199,7 @@ def test_personalized_feed_and_detail(client: TestClient):
     assert res_source_empty.json()["total"] == 0
 
     # 5. Развернутый пост (GET /api/feed/{item_id})
-    res_detail = client.get("/api/feed/101")
+    res_detail = client.get("/api/feed/101?user_id=1")
     assert res_detail.status_code == 200
     detail = res_detail.json()
     assert detail["id"] == 101
@@ -209,5 +208,32 @@ def test_personalized_feed_and_detail(client: TestClient):
     assert detail["original_url"] == "https://habr.com/101"
 
     # Несуществующий пост -> 404
-    res_404 = client.get("/api/feed/99999")
+    res_404 = client.get("/api/feed/99999?user_id=1")
     assert res_404.status_code == 404
+    assert client.get("/api/feed/101?user_id=2").status_code == 404
+
+
+def test_feed_excludes_pending_and_failed_items(client: TestClient, sqlite_engine):
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO feed_items "
+                "(id, source_id, external_id, title, body_text, original_url, "
+                "processing_status, collected_at) VALUES "
+                "(103, 1, 'pending', 'Pending', 'body', 'https://habr.com/103', "
+                "'pending', CURRENT_TIMESTAMP), "
+                "(104, 1, 'failed', 'Failed', 'body', 'https://habr.com/104', "
+                "'failed', CURRENT_TIMESTAMP)"
+            )
+        )
+    response = client.get("/api/feed?user_id=1")
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [101]
+    assert client.get("/api/feed/103?user_id=1").status_code == 404
+    assert client.get("/api/feed/104?user_id=1").status_code == 404
+
+
+def test_feed_unknown_user_returns_404(client: TestClient):
+    response = client.get("/api/feed?user_id=999")
+    assert response.status_code == 404
+    assert client.get("/api/feed/101?user_id=999").status_code == 404

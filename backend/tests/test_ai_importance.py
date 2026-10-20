@@ -149,9 +149,9 @@ def test_importance_rubric_is_loaded_in_order_with_numeric_rule_separate() -> No
     assert [len(question.criteria) for question in policy.importance.questions] == [5, 5, 3]
     assert all(question.prompt.strip() for question in policy.importance.questions)
     assert all(question.additional_instructions.strip() for question in policy.importance.questions)
-    assert importance.IMPORTANCE_AGGREGATION_VERSION == "content-importance-weighted-v1"
+    assert importance.IMPORTANCE_AGGREGATION_VERSION == "content-importance-sum-v2"
     assert importance.IMPORTANCE_WEIGHTS == ImportanceWeights(
-        scale=0.5,
+        scale=1.0,
         significance=1.0,
         reaction=1.0,
     )
@@ -377,9 +377,9 @@ def test_importance_service_aggregates_fractional_components_and_keeps_versions(
     assert run.result.scale_score == 2.75
     assert run.result.significance_score == 3.25
     assert run.result.reaction_score == 1.5
-    assert run.result.total_score == 6.125
-    assert run.result.weights == ImportanceWeights(scale=0.5, significance=1.0, reaction=1.0)
-    assert run.result.aggregation_version == "content-importance-weighted-v1"
+    assert run.result.total_score == 7.5
+    assert run.result.weights == ImportanceWeights(scale=1.0, significance=1.0, reaction=1.0)
+    assert run.result.aggregation_version == "content-importance-sum-v2"
     assert run.result.usage == ImportanceUsage(input_tokens=100, output_tokens=3)
     assert len(adapter.calls) == 1
 
@@ -405,6 +405,23 @@ def test_importance_service_reuses_only_matching_results_and_force_regenerates()
     assert changed.reused is False
     assert forced.reused is False
     assert len(adapter.calls) == 3
+
+
+def test_old_eight_point_aggregation_is_not_reused() -> None:
+    adapter = _FakeAdapter()
+    service = importance.ImportanceService(adapter)
+    current = _run(service.score_importance(_input())).result
+    old = current.model_copy(
+        update={
+            "total_score": 6.125,
+            "weights": ImportanceWeights(scale=0.5, significance=1.0, reaction=1.0),
+            "aggregation_version": "content-importance-weighted-v1",
+        }
+    )
+    refreshed = _run(service.score_importance(_input(), prior_result=old))
+    assert refreshed.reused is False
+    assert refreshed.result.total_score == 7.5
+    assert len(adapter.calls) == 2
 
 
 def test_importance_service_rejects_invalid_input_and_prior_without_adapter_calls() -> None:
@@ -542,9 +559,9 @@ def test_importance_cli_reads_saved_summary_and_saves_metadata_without_echoing_t
     assert saved["scale_score"] == 2.75
     assert saved["significance_score"] == 3.25
     assert saved["reaction_score"] == 1.5
-    assert saved["total_score"] == 6.125
-    assert saved["weights"] == {"scale": 0.5, "significance": 1.0, "reaction": 1.0}
-    assert saved["aggregation_version"] == "content-importance-weighted-v1"
+    assert saved["total_score"] == 7.5
+    assert saved["weights"] == {"scale": 1.0, "significance": 1.0, "reaction": 1.0}
+    assert saved["aggregation_version"] == "content-importance-sum-v2"
     assert SUMMARY not in output.out
 
 

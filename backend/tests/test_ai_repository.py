@@ -100,15 +100,15 @@ def _summary(summary: str, fingerprint: str) -> SummaryResult:
 
 def _importance(fingerprint: str, total: float = 3.0) -> ImportanceResult:
     return ImportanceResult(
-        scale_score=2.0,
+        scale_score=1.0,
         significance_score=1.0,
         reaction_score=1.0,
         fingerprint=f"v1:{fingerprint * 64}",
         provider="typesafe",
         model="jev-test",
         total_score=total,
-        weights=ImportanceWeights(scale=0.5, significance=1.0, reaction=1.0),
-        aggregation_version="content-importance-weighted-v1",
+        weights=ImportanceWeights(scale=1.0, significance=1.0, reaction=1.0),
+        aggregation_version="content-importance-sum-v2",
     )
 
 
@@ -315,6 +315,39 @@ def test_new_summary_invalidates_importance_and_user_score_projections() -> None
     assert session.score.rank_score is None
     assert session.score.reason is None
     assert score_metadata.relevance.last_good.status == "stale"
+
+
+def test_old_importance_aggregation_is_not_a_current_projection() -> None:
+    row = _feed_item()
+    session = _Session(row)
+    repository = FeedItemAnalysisRepository()
+    snapshot = repository.load_snapshot(session, kind="feed_item", unit_id=row.id)
+    assert snapshot is not None
+    summary = _summary("Актуальная выжимка", "a")
+    repository.save_summary(
+        session,
+        feed_item_id=row.id,
+        expected_input_fingerprint=snapshot.input_fingerprint,
+        result=summary,
+    )
+    repository.save_importance(
+        session,
+        feed_item_id=row.id,
+        expected_input_fingerprint=snapshot.input_fingerprint,
+        expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+        result=_importance("b"),
+    )
+    assert repository.load_snapshot(session, kind="feed_item", unit_id=row.id).importance_result
+
+    row.ai_metadata["importance"]["last_good"]["result"].update(
+        total_score=2.5,
+        weights={"scale": 0.5, "significance": 1.0, "reaction": 1.0},
+        aggregation_version="content-importance-weighted-v1",
+    )
+    row.importance_score = 2.5
+    stale = repository.load_snapshot(session, kind="feed_item", unit_id=row.id)
+    assert stale is not None
+    assert stale.importance_result is None
 
 
 def test_relevance_prior_requires_current_summary_and_matching_interest_fingerprint() -> None:

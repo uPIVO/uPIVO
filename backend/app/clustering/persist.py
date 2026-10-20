@@ -18,6 +18,7 @@ from app.clustering.cluster import (
     unclustered_count,
 )
 from app.models.content_cluster import ClusterItem, ContentCluster
+from app.models.enums import ProcessingStatus
 from app.models.feed_item import FeedItem
 
 
@@ -39,7 +40,15 @@ def cluster_feed(session: Session, *, write: bool) -> tuple[list[ClusterView], i
 
 
 def _load_items(session: Session) -> list[StoryItem]:
-    rows = session.scalars(select(FeedItem).order_by(FeedItem.id)).all()
+    rows = session.scalars(
+        select(FeedItem)
+        .where(
+            FeedItem.processing_status.in_(
+                (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+            )
+        )
+        .order_by(FeedItem.id)
+    ).all()
     return [
         StoryItem(
             id=row.id,
@@ -108,12 +117,21 @@ def _sync_members(session: Session, cluster_id: int, plan: ClusterPlan) -> None:
     links = session.scalars(select(ClusterItem).where(ClusterItem.cluster_id == cluster_id)).all()
     by_feed = {link.feed_item_id: link for link in links}
     desired = {feed_item_id: feed_item_id == plan.primary_id for feed_item_id in plan.member_ids}
+    needs_flush = False
     for feed_item_id, link in by_feed.items():
         if feed_item_id not in desired:
             session.delete(link)
+            needs_flush = True
             continue
-        if link.is_primary != desired[feed_item_id]:
-            link.is_primary = desired[feed_item_id]
+        if link.is_primary and not desired[feed_item_id]:
+            link.is_primary = False
+            needs_flush = True
+    # Clear the old primary before promoting another row under the partial unique index.
+    if needs_flush:
+        session.flush()
+    for feed_item_id, link in by_feed.items():
+        if feed_item_id in desired and desired[feed_item_id] and not link.is_primary:
+            link.is_primary = True
     for feed_item_id, is_primary in desired.items():
         if feed_item_id not in by_feed:
             session.add(

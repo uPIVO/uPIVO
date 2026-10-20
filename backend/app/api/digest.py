@@ -15,6 +15,7 @@ from app.schemas.digest import (
     DigestToggleFavoriteResponse,
 )
 from app.services.digest import DigestService
+from app.services.users import UnknownUserError
 
 router = APIRouter(prefix="/digests", tags=["Digests"])
 logger = logging.getLogger(__name__)
@@ -46,7 +47,10 @@ def generate_digest(
         )
 
     service = DigestService(db)
-    return service.generate_digest(request)
+    try:
+        return service.generate_digest(request)
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
 
 
 @router.get(
@@ -68,11 +72,14 @@ def list_digests(
     - Флаг избранного
     """
     service = DigestService(db)
-    return service.list_user_digests(
-        user_id=user_id,
-        digest_type=type,
-        only_favorites=only_favorites,
-    )
+    try:
+        return service.list_user_digests(
+            user_id=user_id,
+            digest_type=type,
+            only_favorites=only_favorites,
+        )
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
 
 
 @router.get(
@@ -82,15 +89,19 @@ def list_digests(
 )
 def get_digest_detail(
     digest_id: int,
+    user_id: Annotated[int, Query(description="ID пользователя", ge=1)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """
     Возвращает полный текст дайджеста и все публикации, вошедшие в него:
     - Заголовок и вводная сводка
-    - Список публикаций с названиями заглавными буквами, ссылками на оригиналы и источниками
+    - Список публикаций с исходными названиями, ссылками на оригиналы и источниками
     """
     service = DigestService(db)
-    digest = service.get_digest_detail(digest_id)
+    try:
+        digest = service.get_digest_detail(user_id, digest_id)
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
     if not digest:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -106,6 +117,7 @@ def get_digest_detail(
 )
 def toggle_favorite(
     digest_id: int,
+    user_id: Annotated[int, Query(description="ID пользователя", ge=1)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """
@@ -113,7 +125,10 @@ def toggle_favorite(
     Дайджесты в избранном НЕ удаляются по истечении 3 дней.
     """
     service = DigestService(db)
-    is_fav = service.toggle_favorite(digest_id)
+    try:
+        is_fav = service.toggle_favorite(user_id, digest_id)
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
     if is_fav is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -2,6 +2,7 @@ import errno
 import json
 import socket
 
+import pytest
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 import app.processing.extractors.__main__ as package_cli
@@ -26,6 +27,11 @@ def _item(**kwargs) -> FeedItem:
     }
     values.update(kwargs)
     return FeedItem(**values)
+
+
+def test_apply_requires_normalized_item():
+    with pytest.raises(ValueError, match="normalized"):
+        apply_extracted_entities(_item(processing_status=ProcessingStatus.PENDING), SourceType.HABR)
 
 
 def test_telegram_text_extracts_unicode_hashtags_mentions_and_urls_without_guessing_media():

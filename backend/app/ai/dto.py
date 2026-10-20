@@ -199,7 +199,7 @@ class ImportanceComponents(BaseModel):
 
 
 class ImportanceResult(ImportanceComponents):
-    total_score: float = Field(ge=0, le=8, strict=True, allow_inf_nan=False)
+    total_score: float = Field(ge=0, le=10, strict=True, allow_inf_nan=False)
     weights: ImportanceWeights
     aggregation_version: str = Field(min_length=1)
 
@@ -212,8 +212,8 @@ class ImportanceResult(ImportanceComponents):
             total = float(value)
         except (OverflowError, ValueError):
             raise ValueError("Итоговая оценка важности должна быть конечной.") from None
-        if not math.isfinite(total) or not 0.0 <= total <= 8.0:
-            raise ValueError("Итоговая оценка важности вне диапазона от 0 до 8.")
+        if not math.isfinite(total) or not 0.0 <= total <= 10.0:
+            raise ValueError("Итоговая оценка важности вне диапазона от 0 до 10.")
         return total
 
     @model_validator(mode="after")

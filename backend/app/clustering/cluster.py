@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from app.clustering.similarity import BLOCK_TOKEN_MAX_DOCS, texts_match, token_set
 from app.processing.normalize import content_hash
 from app.processing.text import clean_oneline, clean_text
+
+MAX_LEXICAL_GAP = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ def build_plans(items: list[StoryItem]) -> list[ClusterPlan]:
         return []
 
     parent = {item.id: item.id for item in items}
+    members = {item.id: {item.id} for item in items}
 
     def find(item_id: int) -> int:
         while parent[item_id] != item_id:
@@ -90,13 +93,17 @@ def build_plans(items: list[StoryItem]) -> list[ClusterPlan]:
             return
         if left_root < right_root:
             parent[right_root] = left_root
+            members[left_root].update(members.pop(right_root))
         else:
             parent[left_root] = right_root
+            members[right_root].update(members.pop(left_root))
 
     by_id = {item.id: item for item in items}
     stored_buckets: dict[str, list[int]] = defaultdict(list)
     text_buckets: dict[str, list[int]] = defaultdict(list)
     for item in items:
+        if not _has_content(item):
+            continue
         stored = (item.content_hash or "").strip()
         if stored:
             stored_buckets[stored].append(item.id)
@@ -108,12 +115,14 @@ def build_plans(items: list[StoryItem]) -> list[ClusterPlan]:
         for other in bucket[1:]:
             union(head, other)
 
-    for left_id, right_id in _candidate_pairs(items):
+    for left_id, right_id in sorted(_candidate_pairs(items)):
         if find(left_id) == find(right_id):
             continue
         left = by_id[left_id]
         right = by_id[right_id]
-        if texts_match(left.title, left.body_text, right.title, right.body_text):
+        if _lexically_compatible(left, right) and _groups_compatible(
+            left_id, right_id, find, members, by_id
+        ):
             union(left_id, right_id)
 
     grouped: dict[int, list[StoryItem]] = defaultdict(list)
@@ -255,6 +264,8 @@ def _exact_ids(group: list[StoryItem]) -> frozenset[int]:
     stored: dict[str, list[int]] = defaultdict(list)
     texts: dict[str, list[int]] = defaultdict(list)
     for item in group:
+        if not _has_content(item):
+            continue
         key = (item.content_hash or "").strip()
         if key:
             stored[key].append(item.id)
@@ -268,6 +279,47 @@ def _exact_ids(group: list[StoryItem]) -> frozenset[int]:
 
 def _text_digest(item: StoryItem) -> str:
     return content_hash(clean_oneline(item.title), clean_text(item.body_text))
+
+
+def _has_content(item: StoryItem) -> bool:
+    return bool(clean_oneline(item.title) or clean_text(item.body_text))
+
+
+def _lexically_compatible(left: StoryItem, right: StoryItem) -> bool:
+    if left.published_at is not None and right.published_at is not None:
+        left_date = _naive_utc(left.published_at)
+        right_date = _naive_utc(right.published_at)
+        if abs(left_date - right_date) > MAX_LEXICAL_GAP:
+            return False
+    return texts_match(left.title, left.body_text, right.title, right.body_text)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(tzinfo=None) if value.tzinfo else value
+
+
+def _groups_compatible(
+    left_id: int,
+    right_id: int,
+    find,
+    members: dict[int, set[int]],
+    by_id: dict[int, StoryItem],
+) -> bool:
+    """Avoid a lexical bridge between two otherwise unrelated groups."""
+    left_root, right_root = find(left_id), find(right_id)
+    return all(
+        _exact_match(by_id[left], by_id[right])
+        or _lexically_compatible(by_id[left], by_id[right])
+        for left in members[left_root]
+        for right in members[right_root]
+    )
+
+
+def _exact_match(left: StoryItem, right: StoryItem) -> bool:
+    return _has_content(left) and _has_content(right) and bool(
+        (left.content_hash and left.content_hash == right.content_hash)
+        or _text_digest(left) == _text_digest(right)
+    )
 
 
 def _candidate_pairs(items: list[StoryItem]) -> set[tuple[int, int]]:

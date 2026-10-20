@@ -36,6 +36,7 @@ from app.services.user_sources import (
     attach_source,
     list_sources,
     set_source_enabled,
+    unlink_source,
 )
 from app.services.users import UnknownUserError
 
@@ -122,6 +123,24 @@ def patch_source(
     except (UnknownUserError, UnknownSourceLinkError) as exc:
         _raise_http(exc)
         raise
+
+
+@sources_router.delete(
+    "/{source_id}",
+    status_code=204,
+    summary="Отключить источник от пользователя",
+    description=f"Удаляет только user_sources; общие Source и FeedItem остаются. {_AUTH}",
+)
+def delete_source(
+    user_id: Annotated[int, Path(ge=1)],
+    source_id: Annotated[int, Path(ge=1)],
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    try:
+        unlink_source(session, user_id, source_id)
+    except (UnknownUserError, UnknownSourceLinkError) as exc:
+        _raise_http(exc)
+    return Response(status_code=204)
 
 
 @topics_router.get(

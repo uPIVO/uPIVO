@@ -12,7 +12,9 @@ from app.clustering.cluster import (
     stale_cluster_ids,
     unclustered_count,
 )
+from app.clustering.persist import _sync_members
 from app.clustering.similarity import texts_match
+from app.models.content_cluster import ClusterItem
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cluster" / "sample.json"
 
@@ -145,7 +147,7 @@ def test_copied_body_clusters_and_short_footer_does_not():
     assert apart == []
 
 
-def test_hash_link_pulls_in_a_similar_third_item():
+def test_exact_group_does_not_bridge_an_unrelated_third_item():
     plans = build_plans(
         [
             _story(1, "Pasta water and salt", "boil then drain", content_hash="h"),
@@ -154,8 +156,35 @@ def test_hash_link_pulls_in_a_similar_third_item():
         ]
     )
     assert len(plans) == 1
-    assert plans[0].member_ids == (1, 2, 3)
+    assert plans[0].member_ids == (1, 2)
     assert plans[0].exact_ids == frozenset({1, 2})
+
+
+def test_old_similar_event_stays_separate_but_exact_copy_can_cluster():
+    early = datetime(2026, 1, 1)
+    late = datetime(2026, 3, 1)
+    title = "Python releases a new stable version"
+    body_a = "The new version adds security fixes and performance improvements."
+    body_b = "This stable version brings performance improvements and security fixes."
+    assert build_plans([
+        _story(1, title, body_a, published_at=early),
+        _story(2, title, body_b, published_at=late),
+    ]) == []
+    exact = build_plans([
+        _story(1, title, body_a, content_hash="same", published_at=early),
+        _story(2, title, body_a, content_hash="same", published_at=late),
+    ])
+    assert len(exact) == 1
+    assert exact[0].member_ids == (1, 2)
+
+
+def test_lexical_chain_does_not_merge_unrelated_endpoints():
+    plans = build_plans([
+        _story(1, "Alpha rocket launch", "Alpha rocket lifted off successfully"),
+        _story(2, "Alpha rocket launch and beta mission", "Alpha rocket and beta mission update"),
+        _story(3, "Beta mission update", "Beta mission achieved orbit"),
+    ])
+    assert all(plan.member_ids != (1, 2, 3) for plan in plans)
 
 
 def test_empty_feed_and_single_item_have_no_cluster():
@@ -164,6 +193,13 @@ def test_empty_feed_and_single_item_have_no_cluster():
     assert build_plans(alone) == []
     assert unclustered_count([], alone) == 1
     assert unclustered_count([], []) == 0
+
+
+def test_empty_publications_do_not_form_an_exact_cluster():
+    assert build_plans([
+        _story(1, None, "", content_hash="same"),
+        _story(2, None, "", content_hash="same"),
+    ]) == []
 
 
 def test_primary_is_longest_body_then_newest_published_at():
@@ -280,3 +316,33 @@ def test_report_uses_database_id_when_present():
     assert text.startswith("cluster=15\tprimary=")
     assert "exact" in text
     assert "clusters=1 unclustered=0" in text
+
+
+def test_primary_is_demoted_before_another_member_is_promoted():
+    links = [
+        ClusterItem(cluster_id=4, feed_item_id=1, is_primary=True),
+        ClusterItem(cluster_id=4, feed_item_id=2, is_primary=False),
+    ]
+
+    class FakeSession:
+        def scalars(self, _statement):
+            class Rows:
+                def all(self):
+                    return links
+            return Rows()
+
+        def flush(self):
+            assert sum(link.is_primary for link in links) == 0
+
+        def delete(self, _link):
+            raise AssertionError("No member should be deleted")
+
+        def add(self, _link):
+            raise AssertionError("No member should be added")
+
+    plan = build_plans([
+        _story(1, "Same headline", "short", content_hash="same"),
+        _story(2, "Same headline", "much longer body", content_hash="same"),
+    ])[0]
+    _sync_members(FakeSession(), 4, plan)
+    assert [(link.feed_item_id, link.is_primary) for link in links] == [(1, False), (2, True)]

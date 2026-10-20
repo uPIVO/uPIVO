@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.enums import SourceType
+from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_source import UserSource
@@ -15,6 +15,7 @@ from app.schemas.feed import (
     PaginatedFeedResponse,
     SourceBrief,
 )
+from app.services.users import require_user
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,9 @@ class FeedService:
         2. Optional filter by source_type (e.g. habr, reddit, telegram, youtube).
         3. Optional topic/tag filter (searches title, body, summary, raw_payload tags/hubs).
         4. Sort by publication date descending (published_at DESC, collected_at DESC).
-        5. Return uppercase title, summary, publication date, source info, and link.
+        5. Return the original title, summary, publication date, source info, and link.
         """
+        require_user(self.db, user_id)
         # Base query joining FeedItem, Source, and UserSource
         base_query = (
             select(FeedItem, Source)
@@ -49,6 +51,11 @@ class FeedService:
                 (UserSource.source_id == Source.id)
                 & (UserSource.user_id == user_id)
                 & (UserSource.enabled.is_(True)),
+            )
+            .where(
+                FeedItem.processing_status.in_(
+                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+                )
             )
         )
 
@@ -88,8 +95,7 @@ class FeedService:
 
         feed_items: list[FeedItemListItem] = []
         for feed_item, source in rows:
-            # 1. Title in uppercase
-            title_text = (feed_item.title or "БЕЗ НАЗВАНИЯ").strip().upper()
+            title_text = (feed_item.title or "Без названия").strip()
 
             # 2. Summary: Use AI-generated summary if present; fallback to truncated body_text
             summary_text = feed_item.summary
@@ -122,12 +128,24 @@ class FeedService:
             offset=offset,
         )
 
-    def get_feed_item_detail(self, item_id: int) -> FeedItemDetail | None:
-        """Retrieve full post details by item ID."""
+    def get_feed_item_detail(self, user_id: int, item_id: int) -> FeedItemDetail | None:
+        """Retrieve details only for an item in this user's enabled sources."""
+        require_user(self.db, user_id)
         query = (
             select(FeedItem, Source)
             .join(Source, FeedItem.source_id == Source.id)
-            .where(FeedItem.id == item_id)
+            .join(
+                UserSource,
+                (UserSource.source_id == Source.id)
+                & (UserSource.user_id == user_id)
+                & (UserSource.enabled.is_(True)),
+            )
+            .where(
+                FeedItem.id == item_id,
+                FeedItem.processing_status.in_(
+                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+                ),
+            )
         )
         row = self.db.execute(query).first()
         if not row:

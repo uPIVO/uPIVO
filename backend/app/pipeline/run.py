@@ -17,8 +17,11 @@ from app.clustering.cluster import (
 )
 from app.clustering.persist import cluster_feed
 from app.db.session import get_engine
+from app.models.enums import ProcessingStatus
+from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_source import UserSource
+from app.processing.extractors.entity_extractor import apply_extracted_entities
 from app.processing.normalize import (
     NormalizeStats,
     map_raw_payload,
@@ -150,6 +153,7 @@ def _normalize_and_cluster(
 ) -> tuple[NormalizeStats, list[ClusterView], int]:
     with session_factory() as session:
         stats = normalize_pending(session, limit=limit)
+        _extract_entities(session)
         views, unclustered = cluster_feed(session, write=not dry_run)
         # Hook: LLM summary of content_clusters would run here.
         if dry_run:
@@ -157,6 +161,27 @@ def _normalize_and_cluster(
         else:
             session.commit()
         return stats, views, unclustered
+
+
+def _extract_entities(session: Session) -> int:
+    """Refresh deterministic entities for normalized shared publications."""
+    rows = session.execute(
+        select(FeedItem, Source.type)
+        .join(Source, FeedItem.source_id == Source.id)
+        .where(
+            FeedItem.processing_status.in_(
+                (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+            )
+        )
+        .order_by(FeedItem.id)
+    ).all()
+    changed = 0
+    for item, source_type in rows:
+        current = item.extracted_entities
+        extracted = apply_extracted_entities(item, source_type)
+        if extracted != current:
+            changed += 1
+    return changed
 
 
 def _unwrap_payload(record: Any) -> Any:

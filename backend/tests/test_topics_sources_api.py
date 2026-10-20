@@ -171,6 +171,60 @@ def test_disable_source_keeps_the_global_row(api):
     assert _count(factory, "user_sources") == 2
 
 
+def test_telegram_attach_canonicalizes_aliases_and_rejects_unrelated_urls(api):
+    client, factory = api
+    user_id = _add_user(factory, "telegram@example.com")
+    first = client.post(
+        f"/api/users/{user_id}/sources",
+        json={"type": "telegram", "url": "https://www.t.me/ExampleChannel"},
+    )
+    again = client.post(
+        f"/api/users/{user_id}/sources",
+        json={"type": "telegram", "url": "https://t.me/examplechannel"},
+    )
+    invalid = client.post(
+        f"/api/users/{user_id}/sources",
+        json={"type": "telegram", "url": "https://example.com/examplechannel"},
+    )
+    assert first.status_code == 201
+    assert again.status_code == 200
+    assert first.json()["source_id"] == again.json()["source_id"]
+    assert first.json()["canonical_url"] == "https://t.me/examplechannel"
+    assert invalid.status_code == 422
+    assert _count(factory, "sources") == 1
+
+
+def test_reddit_attach_rejects_unrelated_site_url(api):
+    client, factory = api
+    user_id = _add_user(factory, "reddit@example.com")
+    response = client.post(
+        f"/api/users/{user_id}/sources",
+        json={"type": "reddit", "url": "https://example.com/r/python"},
+    )
+    assert response.status_code == 422
+    assert client.post(
+        f"/api/users/{user_id}/sources",
+        json={"type": "reddit", "url": "example.com/r/python"},
+    ).status_code == 422
+    assert _count(factory, "sources") == 0
+
+
+def test_unlink_removes_only_one_user_relation(api):
+    client, factory = api
+    one = _add_user(factory, "unlink-one@example.com")
+    two = _add_user(factory, "unlink-two@example.com")
+    payload = {"type": "youtube", "url": CHANNEL_URL}
+    source_id = client.post(f"/api/users/{one}/sources", json=payload).json()["source_id"]
+    client.post(f"/api/users/{two}/sources", json=payload)
+
+    assert client.delete(f"/api/users/{one}/sources/{source_id}").status_code == 204
+    assert client.get(f"/api/users/{one}/sources").json() == []
+    assert len(client.get(f"/api/users/{two}/sources").json()) == 1
+    assert _count(factory, "sources") == 1
+    assert _count(factory, "user_sources") == 1
+    assert client.delete(f"/api/users/{one}/sources/{source_id}").status_code == 404
+
+
 def test_create_topic(api):
     client, factory = api
     user_id = _add_user(factory, "one@example.com")

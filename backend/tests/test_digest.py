@@ -155,6 +155,7 @@ def sqlite_engine():
                 "p2": payload2,
             },
         )
+        conn.execute(text("UPDATE feed_items SET processing_status = 'normalized'"))
 
     yield engine
     engine.dispose()
@@ -190,6 +191,7 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     assert digest1["items_count"] == 2
     assert "Общий дайджест за" in digest1["title"]
     assert len(digest1["items"]) == 2
+    assert digest1["items"][0]["title"] == "Релиз Python 3.13 с новыми фичами"
     # Сортировка по важности: пост с score=9.5 первый
     assert digest1["items"][0]["id"] == 101
 
@@ -230,9 +232,10 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
             text(
                 "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
                 "original_url, published_at, collected_at, summary, raw_payload, "
-                "importance_score) VALUES (103, 2, 'reddit:2', 'Свежий трейлер игры', "
+                "importance_score, processing_status) VALUES "
+                "(103, 2, 'reddit:2', 'Свежий трейлер игры', "
                 "'Текст трейлера', 'https://reddit.com/103', :t, :t, "
-                "'Саммари трейлера', :p, 7.5)"
+                "'Саммари трейлера', :p, 7.5, 'normalized')"
             ),
             {"t": now_dt, "p": payload},
         )
@@ -262,14 +265,21 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
 
     # 6. Клик по плашке (Детальный просмотр GET /api/digests/{id})
     target_id = first_card["id"]
-    res_detail = client.get(f"/api/digests/{target_id}")
+    res_detail = client.get(f"/api/digests/{target_id}?user_id=1")
     assert res_detail.status_code == 200
     detail = res_detail.json()
     assert detail["id"] == target_id
     assert "summary_text" in detail
 
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO users (id, email, password_hash) VALUES (2, 'other@test.com', 'h2')")
+        )
+    assert client.get(f"/api/digests/{target_id}?user_id=2").status_code == 404
+    assert client.patch(f"/api/digests/{target_id}/favorite?user_id=2").status_code == 404
+
     # 7. Избранное: сохранение от удаления
-    res_fav = client.patch(f"/api/digests/{target_id}/favorite")
+    res_fav = client.patch(f"/api/digests/{target_id}/favorite?user_id=1")
     assert res_fav.status_code == 200
     assert res_fav.json()["is_favorite"] is True
 
@@ -293,10 +303,41 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     )
 
     # Проверяем, что дайджест 999 удалён
-    res_old = client.get("/api/digests/999")
+    res_old = client.get("/api/digests/999?user_id=1")
     assert res_old.status_code == 404
 
     # А избранный дайджест target_id остался на месте
-    res_fav_check = client.get(f"/api/digests/{target_id}")
+    res_fav_check = client.get(f"/api/digests/{target_id}?user_id=1")
     assert res_fav_check.status_code == 200
     assert res_fav_check.json()["is_favorite"] is True
+
+
+def test_digest_excludes_pending_and_failed_items(client: TestClient, sqlite_engine):
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO feed_items "
+                "(id, source_id, external_id, title, body_text, original_url, "
+                "processing_status, published_at, collected_at, importance_score) VALUES "
+                "(104, 1, 'pending', 'Pending', 'body', 'https://habr.com/104', "
+                "'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 10), "
+                "(105, 1, 'failed', 'Failed', 'body', 'https://habr.com/105', "
+                "'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 10)"
+            )
+        )
+    response = client.post(
+        "/api/digests/generate",
+        json={"user_id": 1, "type": "general", "period_hours": 24},
+    )
+    assert response.status_code == 201
+    assert {item["id"] for item in response.json()["items"]} == {101, 102}
+
+
+def test_digest_unknown_user_returns_404(client: TestClient):
+    generated = client.post(
+        "/api/digests/generate",
+        json={"user_id": 999, "type": "general", "period_hours": 24},
+    )
+    listed = client.get("/api/digests?user_id=999")
+    assert generated.status_code == 404
+    assert listed.status_code == 404
