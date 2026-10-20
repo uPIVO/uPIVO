@@ -78,7 +78,7 @@ async def sync_source(
                     source_id, source_type.value, "skipped", reason="unsupported Habr URL"
                 )
             with factory() as session:
-                stats = await HabrService(session).sync_publications()
+                stats = await HabrService(session).sync_publications(limit=limit)
             return SourceSyncResult(
                 source_id, source_type.value, "collected" if stats.fetched else "empty",
                 fetched=stats.fetched, saved=stats.saved, inserted=stats.saved, updated=0,

@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api.habr import router as habr_router
 from app.api.health import router as health_router
+from app.api.users import sources_router, topics_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_engine
@@ -26,6 +27,8 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(habr_router, prefix="/api")
+app.include_router(sources_router, prefix="/api")
+app.include_router(topics_router, prefix="/api")
 
 if __name__ == "__main__":
     settings = get_settings()
