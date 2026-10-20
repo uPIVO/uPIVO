@@ -331,6 +331,10 @@ def test_primary_is_demoted_before_another_member_is_promoted():
                     return links
             return Rows()
 
+        def scalar(self, _statement):
+            # Этот тест проверяет порядок primary; сохранённого AI-результата нет.
+            return None
+
         def flush(self):
             assert sum(link.is_primary for link in links) == 0
 

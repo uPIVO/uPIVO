@@ -26,6 +26,7 @@ from app.ai.dto import (
 )
 from app.ai.repository import FeedItemAnalysisRepository
 from app.ai.service import SummarizationService
+from app.models.content_cluster import ClusterItem
 from app.models.feed_item import FeedItem
 from app.models.user import User
 from app.models.user_item_score import UserItemScore
@@ -103,6 +104,8 @@ class _Session:
         return _OneRow((self.state.row, self.state.source_name))
 
     def scalar(self, _statement: Any) -> UserItemScore | None:
+        if _statement.column_descriptions[0].get("entity") is ClusterItem:
+            return None
         return self.state.score
 
     def scalars(self, _statement: Any) -> _Rows:
