@@ -1,1 +1,1 @@
-"""Reserved Upivo module; implementation belongs to future tasks."""
+"""Извлечение структурных признаков из нормализованных FeedItem."""
