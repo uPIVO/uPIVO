@@ -64,6 +64,9 @@ normalized или failed. `processed` зарезервирован для пол
 `content_hash` — одна история, похожие title и body_text — одна строка
 `content_clusters` плюс `cluster_items`. Публикации не удаляются. Summary не
 требуется. CLI: `python -m app.clustering`.
+`python -m app.pipeline --user` запускает сбор, нормализацию и склейку подряд
+для включённых источников одного пользователя. Повторный запуск безопасен.
+LLM summary здесь не вызывается.
 Session-файлы Telegram хранятся локально.
 
 `processing/extractors` зарезервирован под будущую Python-адаптацию идеи
@@ -98,6 +101,8 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
   (`python -m app.processing`); extractors пока зарезервированы.
 - `clustering`: склейка инфоповодов в `content_clusters` / `cluster_items`
   (`python -m app.clustering`). Без LLM и без embeddings.
+- `pipeline`: один процесс `python -m app.pipeline --user` — сбор, нормализация,
+  склейка. Summary не вызывается.
 - `ai`: provider-neutral интерфейс.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
 - `auth`: зарезервировано; схема авторизации не выбрана.

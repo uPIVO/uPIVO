@@ -1,0 +1,171 @@
+"""CLI: collect, normalize, and cluster publications for one user.
+
+Usage (from backend/, PostgreSQL up, migrations applied):
+
+    uv run python -m app.pipeline --user demo@example.com
+    uv run python -m app.pipeline --user 1 --dry-run
+    uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+from app.clustering.cluster import format_report
+from app.connectors.youtube import DEFAULT_LIMIT
+from app.core.config import get_settings
+from app.core.logging import configure_logging
+from app.pipeline.run import FixturePipelineResult, PipelineResult, chain_payloads, run_pipeline
+from app.services.collect import UnknownUserError
+from app.services.source_sync import SourceSyncResult
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run collection, normalization, and clustering for one user. "
+            "Sources must already be enabled. Does not summarize or rank."
+        )
+    )
+    parser.add_argument(
+        "--user",
+        help="users.id or users.email with enabled sources",
+    )
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        help="JSON payload or list of payloads; normalize then cluster without a database",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=f"Max items per source and max pending rows (YouTube default {DEFAULT_LIMIT})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not fetch sources and do not write normalization or clusters",
+    )
+    args = parser.parse_args(argv)
+    configure_logging(get_settings().log_level)
+
+    if args.limit is not None and args.limit < 1:
+        print("limit must be >= 1", file=sys.stderr)
+        return 2
+    if args.user is None and args.fixture is None:
+        print("Pass --user or --fixture", file=sys.stderr)
+        return 2
+    if args.user is not None and args.fixture is not None:
+        print("--user and --fixture cannot be used together", file=sys.stderr)
+        return 2
+
+    if args.fixture is not None:
+        return _run_fixture(args.fixture, limit=args.limit, dry_run=args.dry_run)
+    return _run_user(args.user, limit=args.limit, dry_run=args.dry_run)
+
+
+def _run_fixture(path: Path, *, limit: int | None, dry_run: bool) -> int:
+    try:
+        payloads = _load_fixture(path)
+    except FileNotFoundError:
+        print(f"Fixture not found: {path}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"Invalid fixture: {exc}", file=sys.stderr)
+        return 2
+    if limit is not None:
+        payloads = payloads[:limit]
+    try:
+        result = chain_payloads(payloads)
+    except ValueError as exc:
+        print(f"Invalid fixture: {exc}", file=sys.stderr)
+        return 2
+    _print_fixture(result, dry_run=dry_run)
+    return 0
+
+
+def _run_user(identifier: str, *, limit: int | None, dry_run: bool) -> int:
+    logger = logging.getLogger("app.pipeline")
+    try:
+        result = asyncio.run(run_pipeline(identifier, limit=limit, dry_run=dry_run))
+    except UnknownUserError as exc:
+        print(f"Unknown user: {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        logger.exception("Failed to run the publication pipeline")
+        print("Failed to run the publication pipeline", file=sys.stderr)
+        return 1
+    _print_result(result)
+    return 1 if result.collect.failed else 0
+
+
+def _print_result(result: PipelineResult) -> None:
+    print(f"user_id={result.user_id} email={result.email}")
+    if not result.collect.outcomes:
+        print("sources=0")
+    for row in result.collect.outcomes:
+        print(_format_source(row))
+    collected = result.collect
+    print(
+        f"collected={collected.collected} empty={collected.empty} "
+        f"skipped={collected.skipped} failed={collected.failed}"
+    )
+    stats = result.normalize
+    suffix = " dry-run" if result.dry_run else ""
+    print(f"processed={stats.processed} failed={stats.failed} skipped={stats.skipped}{suffix}")
+    print(
+        format_report(
+            result.clusters,
+            unclustered=result.unclustered,
+            dry_run=result.dry_run,
+        )
+    )
+
+
+def _print_fixture(result: FixturePipelineResult, *, dry_run: bool) -> None:
+    suffix = " dry-run" if dry_run else ""
+    print(f"processed={result.processed} failed={result.failed}{suffix}")
+    print(
+        format_report(
+            result.clusters,
+            unclustered=result.unclustered,
+            dry_run=dry_run,
+        )
+    )
+
+
+def _format_source(row: SourceSyncResult) -> str:
+    parts = [
+        f"source_id={row.source_id}",
+        f"type={row.source_type}",
+        f"status={row.status}",
+        f"fetched={row.fetched}",
+        f"saved={row.saved}",
+    ]
+    if row.inserted is not None:
+        parts.append(f"inserted={row.inserted}")
+    if row.updated is not None:
+        parts.append(f"updated={row.updated}")
+    if row.reason:
+        parts.append(f"reason={row.reason}")
+    return " ".join(parts)
+
+
+def _load_fixture(path: Path) -> list[Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return [raw]
+    raise ValueError("fixture must be a JSON object or a list of objects")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
