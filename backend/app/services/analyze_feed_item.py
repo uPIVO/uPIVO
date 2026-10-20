@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -17,7 +17,12 @@ from app.ai.dto import (
     SummaryResult,
 )
 from app.ai.importance import ImportanceService
-from app.ai.repository import FeedItemAnalysisRepository, FeedItemAnalysisSnapshot, SaveDisposition
+from app.ai.repository import (
+    ContentUnitAnalysisRepository,
+    ContentUnitAnalysisSnapshot,
+    FeedItemInClusterError,
+    SaveDisposition,
+)
 from app.ai.service import RelevanceService, SummarizationService
 from app.models.user import User
 
@@ -74,13 +79,18 @@ class AnalysisStepResult:
 
 
 @dataclass(frozen=True, slots=True)
-class FeedItemAnalysisOutcome:
-    feed_item_id: int
+class ContentUnitAnalysisOutcome:
+    unit_id: int
     operation: AnalysisOperation
     attempt_count: int
+    kind: Literal["feed_item", "cluster"] = "feed_item"
     summary: AnalysisStepResult | None = None
     importance: AnalysisStepResult | None = None
     relevance: AnalysisStepResult | None = None
+
+    @property
+    def feed_item_id(self) -> int | None:
+        return self.unit_id if self.kind == "feed_item" else None
 
     @property
     def succeeded(self) -> bool:
@@ -101,33 +111,41 @@ class FeedItemAnalysisOutcome:
         return "partial"
 
 
-class FeedItemAnalysisUseCase:
+FeedItemAnalysisOutcome = ContentUnitAnalysisOutcome
+
+
+class ContentUnitAnalysisUseCase:
     def __init__(
         self,
         *,
         session_factory: SessionFactory,
-        repository: FeedItemAnalysisRepository | None = None,
+        kind: Literal["feed_item", "cluster"] = "feed_item",
+        repository: ContentUnitAnalysisRepository | None = None,
         summarization_service: SummarizationService | None = None,
         importance_service: ImportanceService | None = None,
         relevance_service: RelevanceService | None = None,
     ) -> None:
+        if kind not in ("feed_item", "cluster"):
+            raise ValueError("kind должен иметь значение 'feed_item' или 'cluster'.")
+
         self._session_factory = session_factory
-        self._repository = repository or FeedItemAnalysisRepository()
+        self._repository = repository if repository is not None else ContentUnitAnalysisRepository()
+        self._kind = kind
         self._summarization_service = summarization_service
         self._importance_service = importance_service
         self._relevance_service = relevance_service
 
     async def run(
         self,
-        feed_item_id: int,
+        unit_id: int,
         *,
         operation: AnalysisOperation | str = AnalysisOperation.ALL,
         user_id: int | None = None,
         interests: list[str] | None = None,
         force: bool = False,
-    ) -> FeedItemAnalysisOutcome:
+    ) -> ContentUnitAnalysisOutcome:
         analysis_operation = self._validate_operation(operation)
-        self._validate_feed_item_id(feed_item_id)
+        self._validate_unit_id(unit_id)
         validated_interests = self._validate_context(analysis_operation, user_id, interests)
         self._require_services(analysis_operation)
 
@@ -135,9 +153,10 @@ class FeedItemAnalysisUseCase:
             if analysis_operation.requires_user_context:
                 self._ensure_user(user_id)
 
-            snapshot = self._load_snapshot(feed_item_id)
+            snapshot = self._load_snapshot(unit_id)
             if snapshot is None:
-                raise AnalysisRequestError("Элемент ленты не найден.")
+                item_name = "Элемент ленты" if self._kind == "feed_item" else "Кластер"
+                raise AnalysisRequestError(f"{item_name} не найден.")
 
             if (
                 analysis_operation.includes_summary
@@ -154,7 +173,7 @@ class FeedItemAnalysisUseCase:
                     raise AnalysisRequestError(
                         "Нет актуальной выжимки. Сначала выполните операцию summary."
                     )
-                return self._missing_summary_outcome(feed_item_id, analysis_operation, attempt)
+                return self._missing_summary_outcome(unit_id, analysis_operation, attempt)
 
             summary_step: AnalysisStepResult | None = None
             importance_step: AnalysisStepResult | None = None
@@ -165,13 +184,13 @@ class FeedItemAnalysisUseCase:
 
             if analysis_operation.includes_summary:
                 summary_step, summary_result = await self._summarize_and_save(
-                    feed_item_id,
+                    unit_id,
                     snapshot,
                     force=force,
                 )
                 if summary_step.status in {AnalysisStatus.FAILED, AnalysisStatus.NOT_FOUND}:
                     return self._outcome(
-                        feed_item_id,
+                        unit_id,
                         analysis_operation,
                         attempt,
                         summary=summary_step,
@@ -182,7 +201,7 @@ class FeedItemAnalysisUseCase:
                     if attempt == 1:
                         continue
                     return self._outcome(
-                        feed_item_id,
+                        unit_id,
                         analysis_operation,
                         attempt,
                         summary=summary_step,
@@ -190,9 +209,7 @@ class FeedItemAnalysisUseCase:
                         relevance=self._skipped_step(analysis_operation.includes_relevance),
                     )
                 if analysis_operation is AnalysisOperation.SUMMARY:
-                    return self._outcome(
-                        feed_item_id, analysis_operation, attempt, summary=summary_step
-                    )
+                    return self._outcome(unit_id, analysis_operation, attempt, summary=summary_step)
 
             if summary_result is None:
                 raise AnalysisRequestError(
@@ -207,7 +224,7 @@ class FeedItemAnalysisUseCase:
 
             if analysis_operation.includes_importance:
                 importance_step, failed, stale = await self._score_importance(
-                    feed_item_id,
+                    unit_id,
                     snapshot,
                     summary_result,
                     summary_lineage,
@@ -219,7 +236,7 @@ class FeedItemAnalysisUseCase:
                     if attempt == 1 and not operation_failed:
                         continue
                     return self._outcome(
-                        feed_item_id,
+                        unit_id,
                         analysis_operation,
                         attempt,
                         summary=summary_step,
@@ -229,7 +246,7 @@ class FeedItemAnalysisUseCase:
 
             if analysis_operation.includes_relevance:
                 relevance_step, failed, stale = await self._score_relevance(
-                    feed_item_id,
+                    unit_id,
                     snapshot,
                     summary_result,
                     summary_lineage,
@@ -243,7 +260,7 @@ class FeedItemAnalysisUseCase:
             if stale_candidate_saved and attempt == 1 and not operation_failed:
                 continue
             return self._outcome(
-                feed_item_id,
+                unit_id,
                 analysis_operation,
                 attempt,
                 summary=summary_step,
@@ -261,10 +278,10 @@ class FeedItemAnalysisUseCase:
             raise AnalysisRequestError("Неизвестная операция анализа.") from None
 
     @staticmethod
-    def _validate_feed_item_id(feed_item_id: int) -> None:
-        if isinstance(feed_item_id, bool) or not isinstance(feed_item_id, int) or feed_item_id <= 0:
+    def _validate_unit_id(unit_id: int) -> None:
+        if isinstance(unit_id, bool) or not isinstance(unit_id, int) or unit_id <= 0:
             raise AnalysisRequestError(
-                "Идентификатор элемента ленты должен быть положительным числом."
+                "Идентификатор единицы анализа должен быть положительным числом."
             )
 
     @staticmethod
@@ -321,12 +338,13 @@ class FeedItemAnalysisUseCase:
         if not self._transaction(get_user, "Не удалось проверить пользователя"):
             raise AnalysisRequestError("Пользователь не найден.")
 
-    def _load_snapshot(self, feed_item_id: int) -> FeedItemAnalysisSnapshot | None:
+    def _load_snapshot(self, unit_id: int) -> ContentUnitAnalysisSnapshot | None:
+        item_name = "элемент ленты" if self._kind == "feed_item" else "кластер"
         return self._transaction(
             lambda session: self._repository.load_snapshot(
-                session, kind="feed_item", unit_id=feed_item_id
+                session, kind=self._kind, unit_id=unit_id
             ),
-            "Не удалось прочитать элемент ленты",
+            f"Не удалось прочитать {item_name}",
         )
 
     def _transaction(self, action: Callable[[Session], Any], failure: str) -> Any:
@@ -334,16 +352,19 @@ class FeedItemAnalysisUseCase:
             with self._session_factory() as session:
                 with session.begin():
                     return action(session)
+        except FeedItemInClusterError as error:
+            raise AnalysisRequestError(str(error)) from None
         except Exception:
             raise AnalysisStorageError(f"{failure} из базы данных.") from None
 
     def _save_summary(
-        self, feed_item_id: int, input_fingerprint: str, result: SummaryResult
+        self, unit_id: int, input_fingerprint: str, result: SummaryResult
     ) -> SaveDisposition:
         return self._transaction(
             lambda session: self._repository.save_summary(
                 session,
-                feed_item_id=feed_item_id,
+                kind=self._kind,
+                unit_id=unit_id,
                 expected_input_fingerprint=input_fingerprint,
                 result=result,
             ),
@@ -352,15 +373,16 @@ class FeedItemAnalysisUseCase:
 
     def _save_importance(
         self,
-        feed_item_id: int,
-        snapshot: FeedItemAnalysisSnapshot,
+        unit_id: int,
+        snapshot: ContentUnitAnalysisSnapshot,
         summary_lineage: str,
         result: ImportanceResult,
     ) -> SaveDisposition:
         return self._transaction(
             lambda session: self._repository.save_importance(
                 session,
-                feed_item_id=feed_item_id,
+                kind=self._kind,
+                unit_id=unit_id,
                 expected_input_fingerprint=snapshot.input_fingerprint,
                 expected_summary_lineage_fingerprint=summary_lineage,
                 result=result,
@@ -370,8 +392,8 @@ class FeedItemAnalysisUseCase:
 
     def _save_relevance(
         self,
-        feed_item_id: int,
-        snapshot: FeedItemAnalysisSnapshot,
+        unit_id: int,
+        snapshot: ContentUnitAnalysisSnapshot,
         summary_lineage: str,
         interests: list[str],
         user_id: int,
@@ -381,7 +403,8 @@ class FeedItemAnalysisUseCase:
             lambda session: self._repository.save_relevance(
                 session,
                 user_id=user_id,
-                feed_item_id=feed_item_id,
+                kind=self._kind,
+                unit_id=unit_id,
                 source_input_fingerprint=snapshot.input_fingerprint,
                 expected_summary_lineage_fingerprint=summary_lineage,
                 interests_fingerprint=interests_input_fingerprint(interests),
@@ -392,8 +415,8 @@ class FeedItemAnalysisUseCase:
 
     async def _summarize_and_save(
         self,
-        feed_item_id: int,
-        snapshot: FeedItemAnalysisSnapshot,
+        unit_id: int,
+        snapshot: ContentUnitAnalysisSnapshot,
         *,
         force: bool,
     ) -> tuple[AnalysisStepResult, SummaryResult | None]:
@@ -409,15 +432,15 @@ class FeedItemAnalysisUseCase:
             return self._failed_step("Не удалось получить выжимку."), None
 
         try:
-            disposition = self._save_summary(feed_item_id, snapshot.input_fingerprint, run.result)
+            disposition = self._save_summary(unit_id, snapshot.input_fingerprint, run.result)
         except AnalysisStorageError as error:
             return self._failed_step(str(error)), None
         return self._saved_step(disposition, run.reused, run.result), run.result
 
     async def _score_importance(
         self,
-        feed_item_id: int,
-        snapshot: FeedItemAnalysisSnapshot,
+        unit_id: int,
+        snapshot: ContentUnitAnalysisSnapshot,
         summary_result: SummaryResult,
         summary_lineage: str,
         *,
@@ -443,7 +466,7 @@ class FeedItemAnalysisUseCase:
             return self._failed_step("Не удалось получить оценку общей важности."), True, False
 
         try:
-            disposition = self._save_importance(feed_item_id, snapshot, summary_lineage, run.result)
+            disposition = self._save_importance(unit_id, snapshot, summary_lineage, run.result)
         except AnalysisStorageError as error:
             return self._failed_step(str(error)), True, False
         step = self._saved_step(disposition, run.reused, run.result)
@@ -455,8 +478,8 @@ class FeedItemAnalysisUseCase:
 
     async def _score_relevance(
         self,
-        feed_item_id: int,
-        snapshot: FeedItemAnalysisSnapshot,
+        unit_id: int,
+        snapshot: ContentUnitAnalysisSnapshot,
         summary_result: SummaryResult,
         summary_lineage: str,
         *,
@@ -472,7 +495,8 @@ class FeedItemAnalysisUseCase:
                 lambda session: self._repository.get_relevance_prior(
                     session,
                     user_id=user_id,
-                    feed_item_id=feed_item_id,
+                    kind=self._kind,
+                    unit_id=unit_id,
                     expected_summary_lineage_fingerprint=summary_lineage,
                     interests_fingerprint=interests_fingerprint,
                 ),
@@ -494,7 +518,7 @@ class FeedItemAnalysisUseCase:
 
         try:
             disposition = self._save_relevance(
-                feed_item_id,
+                unit_id,
                 snapshot,
                 summary_lineage,
                 interests,
@@ -539,39 +563,64 @@ class FeedItemAnalysisUseCase:
             return None
         return AnalysisStepResult(status=AnalysisStatus.SKIPPED)
 
-    @staticmethod
     def _missing_summary_outcome(
-        feed_item_id: int,
+        self,
+        unit_id: int,
         operation: AnalysisOperation,
         attempt_count: int,
-    ) -> FeedItemAnalysisOutcome:
+    ) -> ContentUnitAnalysisOutcome:
         message = (
             "После изменения исходных данных нет актуальной выжимки. Запустите операцию summary."
         )
         failed = AnalysisStepResult(status=AnalysisStatus.FAILED, error=message)
-        return FeedItemAnalysisOutcome(
-            feed_item_id=feed_item_id,
+        return ContentUnitAnalysisOutcome(
+            unit_id=unit_id,
             operation=operation,
             attempt_count=attempt_count,
+            kind=self._kind,
             importance=failed if operation.includes_importance else None,
             relevance=failed if operation.includes_relevance else None,
         )
 
-    @staticmethod
     def _outcome(
-        feed_item_id: int,
+        self,
+        unit_id: int,
         operation: AnalysisOperation,
         attempt_count: int,
         *,
         summary: AnalysisStepResult | None = None,
         importance: AnalysisStepResult | None = None,
         relevance: AnalysisStepResult | None = None,
-    ) -> FeedItemAnalysisOutcome:
-        return FeedItemAnalysisOutcome(
-            feed_item_id=feed_item_id,
+    ) -> ContentUnitAnalysisOutcome:
+        return ContentUnitAnalysisOutcome(
+            unit_id=unit_id,
             operation=operation,
             attempt_count=attempt_count,
+            kind=self._kind,
             summary=summary,
             importance=importance,
             relevance=relevance,
         )
+
+
+class FeedItemAnalysisUseCase(ContentUnitAnalysisUseCase):
+    def __init__(
+        self,
+        *,
+        session_factory: SessionFactory,
+        repository: ContentUnitAnalysisRepository | None = None,
+        summarization_service: SummarizationService | None = None,
+        importance_service: ImportanceService | None = None,
+        relevance_service: RelevanceService | None = None,
+    ) -> None:
+        super().__init__(
+            session_factory=session_factory,
+            kind="feed_item",
+            repository=repository,
+            summarization_service=summarization_service,
+            importance_service=importance_service,
+            relevance_service=relevance_service,
+        )
+
+    async def run(self, feed_item_id: int, **kwargs: Any) -> ContentUnitAnalysisOutcome:  # type: ignore[override]
+        return await super().run(unit_id=feed_item_id, **kwargs)
