@@ -1,7 +1,8 @@
 """ORM models. Imported here so Alembic sees metadata."""
 
 from app.models.content_cluster import ClusterItem, ContentCluster
-from app.models.enums import ProcessingStatus, SourceType
+from app.models.digest import Digest, DigestItem
+from app.models.enums import DigestType, ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
 from app.models.feed_item_folder import FeedItemFolder
 from app.models.folder import Folder
@@ -15,6 +16,9 @@ from app.models.user_source import UserSource
 __all__ = [
     "ClusterItem",
     "ContentCluster",
+    "Digest",
+    "DigestItem",
+    "DigestType",
     "FeedItem",
     "FeedItemFolder",
     "Folder",
