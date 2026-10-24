@@ -105,6 +105,28 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE TABLE content_clusters ("
+                "  id INTEGER PRIMARY KEY,"
+                "  title TEXT,"
+                "  summary TEXT,"
+                "  importance_score REAL,"
+                "  ai_metadata TEXT,"
+                "  created_at DATETIME"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE cluster_items ("
+                "  id INTEGER PRIMARY KEY,"
+                "  cluster_id INTEGER NOT NULL,"
+                "  feed_item_id INTEGER NOT NULL,"
+                "  is_primary BOOLEAN NOT NULL DEFAULT 0"
+                ")"
+            )
+        )
 
         # 1. Users
         conn.execute(
@@ -341,3 +363,89 @@ def test_digest_unknown_user_returns_404(client: TestClient):
     listed = client.get("/api/digests?user_id=999")
     assert generated.status_code == 404
     assert listed.status_code == 404
+
+
+def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
+    """Publications belonging to the same cluster should be grouped into a single digest card."""
+    with sqlite_engine.begin() as conn:
+        # Create user 3 with no past digests
+        conn.execute(
+            text("INSERT INTO users (id, email, password_hash) VALUES (3, 'u3@test.com', 'h3')")
+        )
+        # Create third source (Telegram)
+        conn.execute(
+            text(
+                "INSERT INTO sources (id, type, name, canonical_url) VALUES "
+                "(3, 'telegram', 'Python TG', 'https://t.me/py_chan')"
+            )
+        )
+        # Subscribe user 3 to Habr (source 1), Reddit (source 2), and Telegram (source 3)
+        conn.execute(
+            text(
+                "INSERT INTO user_sources (id, user_id, source_id, enabled) VALUES "
+                "(10, 3, 1, 1), "
+                "(11, 3, 2, 1), "
+                "(12, 3, 3, 1)"
+            )
+        )
+
+        one_hour_ago = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        # Item 106 from Telegram about the same Python release as 101
+        conn.execute(
+            text(
+                "INSERT INTO feed_items ("
+                "  id, source_id, external_id, title, body_text, original_url, "
+                "published_at, collected_at, summary, importance_score, processing_status"
+                ") VALUES "
+                "  (106, 3, 'tg:106', 'TG: Вышел релиз Python 3.14', 'Текст в телеге про релиз...', "
+                "'https://t.me/py_chan/106', :pub, :col, 'TG саммари', 9.0, 'normalized')"
+            ),
+            {"pub": one_hour_ago, "col": one_hour_ago},
+        )
+
+        # Create ContentCluster for the story
+        conn.execute(
+            text(
+                "INSERT INTO content_clusters (id, title, summary, importance_score, created_at) VALUES "
+                "(1, 'Инфоповод: Релиз Python 3.14', 'Сводка кластера: вышел новый Python.', 9.5, CURRENT_TIMESTAMP)"
+            )
+        )
+
+        # Link 101 and 106 to cluster 1
+        conn.execute(
+            text(
+                "INSERT INTO cluster_items (id, cluster_id, feed_item_id, is_primary) VALUES "
+                "(1, 1, 101, 1), "
+                "(2, 1, 106, 0)"
+            )
+        )
+
+    # Generate digest for user 3
+    res = client.post(
+        "/api/digests/generate",
+        json={"user_id": 3, "type": "general", "period_hours": 24},
+    )
+    assert res.status_code == 201
+    data = res.json()
+
+    # User 3 has items 101 (Habr), 102 (Reddit), 106 (Telegram).
+    # Since 101 and 106 belong to the same cluster, there should be 2 cards (Cluster 1 + Item 102), not 3!
+    assert data["items_count"] == 2
+    assert len(data["items"]) == 2
+
+    cluster_card = next(item for item in data["items"] if item["is_cluster"])
+    assert cluster_card["cluster_id"] == 1
+    assert cluster_card["title"] == "Инфоповод: Релиз Python 3.14"
+    assert cluster_card["summary"] == "Сводка кластера: вышел новый Python."
+    assert cluster_card["items_count"] == 2
+    source_names = {s["name"] for s in cluster_card["related_sources"]}
+    assert source_names == {"Habr Python", "Python TG"}
+
+    # Also verify detail view
+    digest_id = data["id"]
+    res_detail = client.get(f"/api/digests/{digest_id}?user_id=3")
+    assert res_detail.status_code == 200
+    detail_data = res_detail.json()
+    assert detail_data["items_count"] == 2
+    assert len(detail_data["items"]) == 2
+
