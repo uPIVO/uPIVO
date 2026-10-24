@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai.repository import ContentUnitAnalysisRepository
 from app.clustering.cluster import (
     AssignedCluster,
     ClusterPlan,
@@ -83,18 +84,32 @@ def _write(
     existing: list[StoredCluster],
     assigned: list[AssignedCluster],
 ) -> list[int]:
-    stale = stale_cluster_ids(existing, assigned)
+    stale = sorted(stale_cluster_ids(existing, assigned))
+    # Запись состава и AI-сохранение используют один lock родительского кластера.
+    stale_rows = [
+        session.get(ContentCluster, cluster_id, with_for_update=True, populate_existing=True)
+        for cluster_id in stale
+    ]
     if stale:
         links = session.scalars(select(ClusterItem).where(ClusterItem.cluster_id.in_(stale))).all()
+        member_ids = sorted({link.feed_item_id for link in links})
+        if member_ids:
+            session.scalars(
+                select(FeedItem)
+                .where(FeedItem.id.in_(member_ids))
+                .order_by(FeedItem.id)
+                .with_for_update()
+            ).all()
         for link in links:
             session.delete(link)
         session.flush()
-        for cluster_id in stale:
-            row = session.get(ContentCluster, cluster_id)
+        for row in stale_rows:
             if row is not None:
                 session.delete(row)
+        # Персональные результаты удаляются FK ON DELETE CASCADE.
         session.flush()
 
+    repository = ContentUnitAnalysisRepository()
     cluster_ids: list[int] = []
     for slot in assigned:
         if slot.cluster_id is None:
@@ -103,10 +118,14 @@ def _write(
             session.flush()
             cluster_id = row.id
         else:
-            row = session.get(ContentCluster, slot.cluster_id)
+            row = session.get(
+                ContentCluster, slot.cluster_id, with_for_update=True, populate_existing=True
+            )
             if row is None:
-                raise RuntimeError(f"content_clusters.id {slot.cluster_id} disappeared")
-            row.title = slot.plan.title
+                raise RuntimeError(f"Кластер {slot.cluster_id} исчез во время сохранения.")
+            if row.title != slot.plan.title:
+                repository.invalidate_target(session, kind="cluster", unit_id=row.id)
+                row.title = slot.plan.title
             cluster_id = slot.cluster_id
         _sync_members(session, cluster_id, slot.plan)
         cluster_ids.append(cluster_id)
@@ -117,6 +136,19 @@ def _sync_members(session: Session, cluster_id: int, plan: ClusterPlan) -> None:
     links = session.scalars(select(ClusterItem).where(ClusterItem.cluster_id == cluster_id)).all()
     by_feed = {link.feed_item_id: link for link in links}
     desired = {feed_item_id: feed_item_id == plan.primary_id for feed_item_id in plan.member_ids}
+    # Блокируем и старых, и новых участников до изменения членства. Одиночное
+    # AI-сохранение блокирует те же FeedItem перед проверкой отсутствия кластера.
+    session.scalars(
+        select(FeedItem)
+        .where(FeedItem.id.in_(sorted(set(by_feed) | set(desired))))
+        .order_by(FeedItem.id)
+        .with_for_update()
+    ).all()
+    if {item_id: link.is_primary for item_id, link in by_feed.items()} != desired:
+        repository = ContentUnitAnalysisRepository()
+        repository.invalidate_target(session, kind="cluster", unit_id=cluster_id)
+        for item_id in sorted(set(desired) - set(by_feed)):
+            repository.invalidate_target(session, kind="feed_item", unit_id=item_id)
     needs_flush = False
     for feed_item_id, link in by_feed.items():
         if feed_item_id not in desired:

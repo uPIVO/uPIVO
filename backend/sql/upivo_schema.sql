@@ -139,14 +139,14 @@ CREATE INDEX idx_feed_items_source_id
 -- =========================
 -- CONTENT CLUSTERS
 -- =========================
--- Целевая схема варианта A для будущей интеграции кластеров.
--- Промежуточный Stage 4 ITD-17 пока сохраняет анализ только для FeedItem:
--- здесь намеренно нет content_clusters.importance_score и cluster_id в user_item_scores.
+-- Общий анализ хранится один раз на кластер, без копирования участникам.
 
 CREATE TABLE content_clusters (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     title TEXT,
     summary TEXT,
+    importance_score DOUBLE PRECISION,
+    ai_metadata JSONB,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -163,16 +163,22 @@ CREATE TABLE cluster_items (
 CREATE INDEX idx_cluster_items_feed_item_id
     ON cluster_items(feed_item_id);
 
+CREATE UNIQUE INDEX uq_cluster_items_feed_item_id
+    ON cluster_items(feed_item_id);
+
+CREATE UNIQUE INDEX uq_cluster_items_primary_per_cluster
+    ON cluster_items(cluster_id) WHERE is_primary = TRUE;
+
 -- =========================
 -- PERSONAL RANKING
 -- =========================
--- Промежуточная реализация ITD-17 поддерживает только целевую единицу feed_item.
--- Будущие cluster_id и XOR-ограничение добавляются после интеграции ORM кластеров.
+-- Персональная оценка относится ровно к одной цели: FeedItem либо ContentCluster.
 
 CREATE TABLE user_item_scores (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    feed_item_id BIGINT NOT NULL REFERENCES feed_items(id) ON DELETE CASCADE,
+    feed_item_id BIGINT REFERENCES feed_items(id) ON DELETE CASCADE,
+    cluster_id BIGINT REFERENCES content_clusters(id) ON DELETE CASCADE,
     relevance_score DOUBLE PRECISION,
     rank_score DOUBLE PRECISION,
     reason TEXT,
@@ -182,12 +188,19 @@ CREATE TABLE user_item_scores (
 
     CONSTRAINT ck_user_item_scores_relevance_range
         CHECK (relevance_score IS NULL OR (relevance_score >= 0.0 AND relevance_score <= 1.0)),
+    CONSTRAINT ck_user_item_scores_exactly_one_target
+        CHECK ((feed_item_id IS NOT NULL) <> (cluster_id IS NOT NULL)),
     CONSTRAINT uq_user_item_scores_user_feed
-        UNIQUE (user_id, feed_item_id)
+        UNIQUE (user_id, feed_item_id),
+    CONSTRAINT uq_user_item_scores_user_cluster
+        UNIQUE (user_id, cluster_id)
 );
 
 CREATE INDEX idx_user_item_scores_feed_item_id
     ON user_item_scores(feed_item_id);
+
+CREATE INDEX idx_user_item_scores_cluster_id
+    ON user_item_scores(cluster_id);
 
 -- =========================
 -- EXPLICIT FEEDBACK

@@ -78,6 +78,28 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE TABLE content_clusters ("
+                "  id INTEGER PRIMARY KEY,"
+                "  title TEXT,"
+                "  summary TEXT,"
+                "  importance_score REAL,"
+                "  ai_metadata TEXT,"
+                "  created_at DATETIME"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE cluster_items ("
+                "  id INTEGER PRIMARY KEY,"
+                "  cluster_id INTEGER NOT NULL,"
+                "  feed_item_id INTEGER NOT NULL,"
+                "  is_primary BOOLEAN NOT NULL DEFAULT 0"
+                ")"
+            )
+        )
 
         # Users
         conn.execute(
@@ -237,3 +259,80 @@ def test_feed_unknown_user_returns_404(client: TestClient):
     response = client.get("/api/feed?user_id=999")
     assert response.status_code == 404
     assert client.get("/api/feed/101?user_id=999").status_code == 404
+
+
+def test_feed_cluster_deduplication_into_single_card(client: TestClient, sqlite_engine):
+    """Multiple publications of the same story (ContentCluster) should be collapsed into 1 card."""
+    with sqlite_engine.begin() as conn:
+        # Create third source (Telegram) and subscribe user 1 to it as well
+        conn.execute(
+            text(
+                "INSERT INTO sources (id, type, name, canonical_url) VALUES "
+                "(3, 'telegram', 'Python Channel', 'https://t.me/py_chan')"
+            )
+        )
+        conn.execute(
+            text("INSERT INTO user_sources (id, user_id, source_id, enabled) VALUES (3, 1, 3, 1)")
+        )
+
+        # Insert second item about Python release from Telegram
+        now = datetime(2026, 10, 16, 15, 0).isoformat()
+        conn.execute(
+            text(
+                "INSERT INTO feed_items ("
+                "  id, source_id, external_id, title, body_text, original_url, "
+                "published_at, collected_at, summary, processing_status"
+                ") VALUES "
+                "  (105, 3, 'tg:105', 'Вышел релиз Python!', 'Пост в телеге про релиз...', "
+                "'https://t.me/py_chan/105', :pub, :col, 'Телеграм саммари', 'normalized')"
+            ),
+            {"pub": now, "col": now},
+        )
+
+        # Create ContentCluster for the story
+        conn.execute(
+            text(
+                "INSERT INTO content_clusters (id, title, summary, created_at) VALUES "
+                "(1, 'Большой релиз Python 3.14', 'Сводная выжимка: вышел релиз языка Python.', CURRENT_TIMESTAMP)"
+            )
+        )
+
+        # Link both items (101 - Habr, 105 - Telegram) to cluster 1, with 101 as primary
+        conn.execute(
+            text(
+                "INSERT INTO cluster_items (id, cluster_id, feed_item_id, is_primary) VALUES "
+                "(1, 1, 101, 1), "
+                "(2, 1, 105, 0)"
+            )
+        )
+
+    # User 1 has access to both 101 and 105, but they are in the same cluster!
+    res = client.get("/api/feed?user_id=1")
+    assert res.status_code == 200
+    data = res.json()
+
+    # Total cards must be 1 instead of 2 separate cards!
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+
+    card = data["items"][0]
+    assert card["is_cluster"] is True
+    assert card["cluster_id"] == 1
+    assert card["title"] == "Большой релиз Python 3.14"
+    assert card["summary"] == "Сводная выжимка: вышел релиз языка Python."
+    assert card["items_count"] == 2
+    # Verify related sources contains both sources
+    source_names = {s["name"] for s in card["related_sources"]}
+    assert source_names == {"Habr Python", "Python Channel"}
+
+    # Detail view also reflects the cluster
+    res_detail = client.get("/api/feed/101?user_id=1")
+    assert res_detail.status_code == 200
+    detail = res_detail.json()
+    assert detail["is_cluster"] is True
+    assert detail["cluster_id"] == 1
+    assert detail["title"] == "Большой релиз Python 3.14"
+    assert detail["summary"] == "Сводная выжимка: вышел релиз языка Python."
+    assert detail["items_count"] == 2
+    assert len(detail["related_items"]) == 2
+

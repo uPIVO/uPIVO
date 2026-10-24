@@ -22,6 +22,7 @@ from app.ai.repository import (
     UnsupportedContentUnitKind,
     content_unit_from_feed_item,
 )
+from app.models.content_cluster import ClusterItem
 from app.models.feed_item import FeedItem
 from app.models.user_item_score import UserItemScore
 
@@ -58,6 +59,8 @@ class _Session:
         return _OneRow((self.feed_item, self.source_name))
 
     def scalar(self, _statement: Any) -> UserItemScore | None:
+        if _statement.column_descriptions[0].get("entity") is ClusterItem:
+            return None
         return self.score
 
     def scalars(self, _statement: Any) -> _Rows:
@@ -140,7 +143,7 @@ def test_user_item_score_model_matches_feed_only_storage_contract() -> None:
     ]
     foreign_keys = {foreign_key.parent.name: foreign_key for foreign_key in table.foreign_keys}
 
-    assert table.c.feed_item_id.nullable is False
+    assert table.c.feed_item_id.nullable is True
     assert table.c.user_id.nullable is False
     assert table.c.relevance_score.nullable is True
     assert table.c.rank_score.nullable is True
@@ -148,10 +151,10 @@ def test_user_item_score_model_matches_feed_only_storage_contract() -> None:
     assert table.c.analysis_metadata.nullable is True
     assert isinstance(table.c.analysis_metadata.type, JSONB)
     assert ("user_id", "feed_item_id") in unique_constraints
-    assert set(foreign_keys) == {"user_id", "feed_item_id"}
+    assert set(foreign_keys) == {"user_id", "feed_item_id", "cluster_id"}
     assert all(foreign_key.ondelete == "CASCADE" for foreign_key in foreign_keys.values())
     assert any("relevance_score" in str(check.sqltext) for check in checks)
-    assert "cluster_id" not in table.c
+    assert table.c.cluster_id.nullable is True
 
 
 def test_feed_item_mapping_includes_source_but_excludes_raw_payload() -> None:
@@ -185,15 +188,15 @@ def test_locked_snapshot_omits_raw_payload_and_locks_source_with_feed_item() -> 
     assert "FOR UPDATE OF feed_items, sources" in statement
 
 
-def test_repository_rejects_cluster_without_querying_cluster_tables() -> None:
+def test_repository_rejects_unknown_kind_without_querying_tables() -> None:
     session = _Session(_feed_item())
 
     try:
-        FeedItemAnalysisRepository().load_snapshot(session, kind="cluster", unit_id=7)
+        FeedItemAnalysisRepository().load_snapshot(session, kind="unknown", unit_id=7)
     except UnsupportedContentUnitKind as exc:
-        assert "пока не поддерживается" in str(exc)
+        assert "Неизвестный вид" in str(exc)
     else:
-        raise AssertionError("Для кластера ожидалась явная ошибка")
+        raise AssertionError("Для неизвестного вида ожидалась явная ошибка")
 
     assert session.execute_count == 0
 

@@ -12,19 +12,20 @@ from app.services.analyze_feed_item import (
     AnalysisOperation,
     AnalysisStatus,
     AnalysisStepResult,
-    FeedItemAnalysisOutcome,
+    ContentUnitAnalysisOutcome,
 )
 
 
 class _FakeUseCase:
-    outcome: FeedItemAnalysisOutcome
+    outcome: ContentUnitAnalysisOutcome
     calls: list[dict[str, Any]] = []
+    dependencies: dict[str, Any] = {}
 
-    def __init__(self, **_dependencies: Any) -> None:
-        return None
+    def __init__(self, **dependencies: Any) -> None:
+        type(self).dependencies = dependencies
 
-    async def run(self, feed_item_id: int, **arguments: Any) -> FeedItemAnalysisOutcome:
-        self.calls.append({"feed_item_id": feed_item_id, **arguments})
+    async def run(self, unit_id: int, **arguments: Any) -> ContentUnitAnalysisOutcome:
+        self.calls.append({"unit_id": unit_id, **arguments})
         return self.outcome
 
 
@@ -65,8 +66,8 @@ def test_cli_emits_structured_result_without_echoing_interests(
         save_disposition=SaveDisposition.CURRENT,
         result=summary,
     )
-    _FakeUseCase.outcome = FeedItemAnalysisOutcome(
-        feed_item_id=7,
+    _FakeUseCase.outcome = ContentUnitAnalysisOutcome(
+        unit_id=7,
         operation=AnalysisOperation.ALL,
         attempt_count=1,
         summary=current,
@@ -108,6 +109,10 @@ def test_cli_emits_structured_result_without_echoing_interests(
 
     output = capsys.readouterr().out
     parsed = json.loads(output)
+    assert parsed["kind"] == "feed_item"
+    assert parsed["unit_id"] == 7
+    assert parsed["feed_item_id"] == 7
+    assert _FakeUseCase.calls[0]["unit_id"] == 7
     assert parsed["operation"] == "all"
     assert parsed["status"] == "current"
     assert parsed["attempt_count"] == 1
@@ -123,8 +128,8 @@ def test_cli_constructs_only_adapters_for_selected_operation(monkeypatch, capsys
         provider="openrouter",
         preset="summary-model",
     )
-    _FakeUseCase.outcome = FeedItemAnalysisOutcome(
-        feed_item_id=7,
+    _FakeUseCase.outcome = ContentUnitAnalysisOutcome(
+        unit_id=7,
         operation=AnalysisOperation.SUMMARY,
         attempt_count=1,
         summary=AnalysisStepResult(
@@ -166,6 +171,50 @@ def test_cli_constructs_only_adapters_for_selected_operation(monkeypatch, capsys
     assert _FakeAdapter.models == ["summary-override"]
     assert _FakeUseCase.calls[0]["operation"] == AnalysisOperation.SUMMARY
     capsys.readouterr()
+
+
+def test_cli_cluster_uses_generic_use_case_and_json_fields(monkeypatch, capsys) -> None:
+    summary = SummaryResult(
+        summary="Проверенная выжимка",
+        fingerprint=f"v1:{hashlib.sha256(b'cluster').hexdigest()}",
+        provider="openrouter",
+        preset="summary-model",
+    )
+    _FakeUseCase.outcome = ContentUnitAnalysisOutcome(
+        unit_id=82,
+        operation=AnalysisOperation.SUMMARY,
+        attempt_count=1,
+        kind="cluster",
+        summary=AnalysisStepResult(
+            status=AnalysisStatus.CURRENT,
+            reused=False,
+            save_disposition=SaveDisposition.CURRENT,
+            result=summary,
+        ),
+    )
+    _FakeUseCase.calls.clear()
+    _FakeUseCase.dependencies.clear()
+    _FakeAdapter.models.clear()
+    monkeypatch.setattr("app.ai.analyze_feed_item.ContentUnitAnalysisUseCase", _FakeUseCase)
+
+    def unexpected_feed_item_use_case(**_dependencies: Any) -> None:
+        raise AssertionError("Для cluster требуется ContentUnitAnalysisUseCase")
+
+    monkeypatch.setattr(
+        "app.ai.analyze_feed_item.FeedItemAnalysisUseCase", unexpected_feed_item_use_case
+    )
+    monkeypatch.setattr("app.ai.analyze_feed_item.get_settings", lambda: object())
+    monkeypatch.setattr("app.ai.analyze_feed_item.get_engine", lambda: object())
+    monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
+
+    assert main(["82", "--kind", "cluster", "--operation", "summary"]) == 0
+    assert _FakeUseCase.dependencies["kind"] == "cluster"
+    assert _FakeUseCase.calls[0]["unit_id"] == 82
+    assert _FakeUseCase.calls[0]["operation"] == AnalysisOperation.SUMMARY
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["kind"] == "cluster"
+    assert parsed["unit_id"] == 82
+    assert "feed_item_id" not in parsed
 
 
 def test_cli_sanitizes_invalid_interest_json_without_echoing_contents(

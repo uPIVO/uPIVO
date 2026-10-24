@@ -22,7 +22,8 @@ from app.services.analyze_feed_item import (
     AnalysisRequestError,
     AnalysisStepResult,
     AnalysisStorageError,
-    FeedItemAnalysisOutcome,
+    ContentUnitAnalysisOutcome,
+    ContentUnitAnalysisUseCase,
     FeedItemAnalysisUseCase,
 )
 
@@ -66,24 +67,34 @@ def _step_json(step: AnalysisStepResult) -> dict[str, Any]:
     return output
 
 
-def _outcome_json(outcome: FeedItemAnalysisOutcome) -> dict[str, Any]:
+def _outcome_json(outcome: ContentUnitAnalysisOutcome) -> dict[str, Any]:
     operations: dict[str, dict[str, Any]] = {}
     for name in ("summary", "importance", "relevance"):
         step = getattr(outcome, name)
         if step is not None:
             operations[name] = _step_json(step)
-    return {
-        "feed_item_id": outcome.feed_item_id,
+    output = {
+        "kind": outcome.kind,
+        "unit_id": outcome.unit_id,
         "operation": outcome.operation.value,
         "status": outcome.status,
         "attempt_count": outcome.attempt_count,
         "operations": operations,
     }
+    if outcome.kind == "feed_item":
+        output["feed_item_id"] = outcome.unit_id
+    return output
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _Parser(description="Ручной анализ элемента ленты без Celery.")
-    parser.add_argument("feed_item_id", type=_positive_int, help="ID элемента ленты")
+    parser = _Parser(description="Ручной анализ FeedItem или ContentCluster без Celery.")
+    parser.add_argument("unit_id", type=_positive_int, help="ID единицы анализа")
+    parser.add_argument(
+        "--kind",
+        choices=("feed_item", "cluster"),
+        default="feed_item",
+        help="Тип единицы: feed_item (по умолчанию) или cluster",
+    )
     parser.add_argument(
         "--operation",
         choices=[operation.value for operation in AnalysisOperation],
@@ -142,15 +153,19 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         engine = get_engine()
-        use_case = FeedItemAnalysisUseCase(
-            session_factory=lambda: Session(engine),
-            summarization_service=summarization_service,
-            importance_service=importance_service,
-            relevance_service=relevance_service,
-        )
+        use_case_options = {
+            "session_factory": lambda: Session(engine),
+            "summarization_service": summarization_service,
+            "importance_service": importance_service,
+            "relevance_service": relevance_service,
+        }
+        if args.kind == "feed_item":
+            use_case = FeedItemAnalysisUseCase(**use_case_options)
+        else:
+            use_case = ContentUnitAnalysisUseCase(kind=args.kind, **use_case_options)
         outcome = asyncio.run(
             use_case.run(
-                args.feed_item_id,
+                args.unit_id,
                 operation=operation,
                 user_id=args.user_id,
                 interests=interests,
@@ -164,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Некорректная конфигурация или входные данные анализа.", file=sys.stderr)
         return 2
     except Exception:
-        print("Не удалось выполнить анализ элемента ленты.", file=sys.stderr)
+        print("Не удалось выполнить анализ единицы контента.", file=sys.stderr)
         return 2
 
     print(json.dumps(_outcome_json(outcome), ensure_ascii=False, indent=2))
