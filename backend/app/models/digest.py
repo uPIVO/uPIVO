@@ -48,18 +48,23 @@ class Digest(Base):
 
 
 class DigestItem(Base):
-    """Link between a digest and feed items included in it."""
+    """Link between a digest and feed items or clusters included in it."""
 
     __tablename__ = "digest_items"
     __table_args__ = (
         Index("idx_digest_items_digest_id", "digest_id"),
         Index("idx_digest_items_feed_item_id", "feed_item_id"),
+        Index("idx_digest_items_cluster_id", "cluster_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     digest_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("digests.id", ondelete="CASCADE"), nullable=False)
     feed_item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("feed_items.id", ondelete="CASCADE"), nullable=False)
+    cluster_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("content_clusters.id", ondelete="CASCADE"), nullable=True
+    )
     included_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
     digest: Mapped["Digest"] = relationship("Digest", back_populates="items")
+
 

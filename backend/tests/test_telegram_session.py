@@ -1,4 +1,5 @@
 import stat
+import sys
 
 import pytest
 
@@ -24,7 +25,8 @@ def test_session_write_preserves_other_env_values_and_restricts_permissions(tmp_
     assert "DATABASE_URL=postgresql://fixture\n" in contents
     assert contents.count("TELEGRAM_SESSION=") == 1
     assert "TELEGRAM_SESSION=new-fixture-session\n" in contents
-    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 def test_session_write_requires_existing_env_and_rejects_line_injection(tmp_path):

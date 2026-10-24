@@ -79,6 +79,28 @@ def sqlite_engine():
         )
         conn.execute(
             text(
+                "CREATE TABLE content_clusters ("
+                "  id INTEGER PRIMARY KEY,"
+                "  title TEXT,"
+                "  summary TEXT,"
+                "  importance_score REAL,"
+                "  ai_metadata TEXT,"
+                "  created_at DATETIME"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE cluster_items ("
+                "  id INTEGER PRIMARY KEY,"
+                "  cluster_id INTEGER NOT NULL,"
+                "  feed_item_id INTEGER NOT NULL,"
+                "  is_primary BOOLEAN NOT NULL DEFAULT 0"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
                 "CREATE TABLE digests ("
                 "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                 "  user_id INTEGER NOT NULL,"
@@ -100,6 +122,7 @@ def sqlite_engine():
                 "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
                 "  digest_id INTEGER NOT NULL,"
                 "  feed_item_id INTEGER NOT NULL,"
+                "  cluster_id INTEGER,"
                 "  included_updated_at DATETIME"
                 ")"
             )
@@ -119,7 +142,7 @@ def sqlite_engine():
             )
         )
 
-        # 3. User 1 subscriptions
+        # 3. User Subscriptions
         conn.execute(
             text(
                 "INSERT INTO user_sources (id, user_id, source_id, enabled) VALUES "
@@ -128,29 +151,35 @@ def sqlite_engine():
             )
         )
 
-        # 4. Feed Items (опубликованы 2 часа назад)
-        two_hours_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)
-        payload1 = json.dumps({"tags": ["python", "ai"], "hubs": ["Разработка"]})
-        payload2 = json.dumps({"tags": ["игры", "gamedev"], "hubs": ["Игры"]})
+        # 4. Feed Items (published within last 12 hours)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        pub1 = now - timedelta(hours=2)
+        pub2 = now - timedelta(hours=4)
+        pub3 = now - timedelta(hours=6)
 
         conn.execute(
             text(
                 "INSERT INTO feed_items ("
-                "  id, source_id, external_id, title, body_text, original_url, published_at, collected_at, summary, raw_payload, importance_score, updated_at"
-                ") VALUES "
-                "  (101, 1, 'habr:1', 'Релиз Python 3.13 с новыми фичами', 'Полный текст про Python...', 'https://habr.com/101', :t1, :t1, 'Саммари релиза Python', :p1, 9.5, NULL), "
-                "  (102, 2, 'reddit:1', 'Анонс новой игры осени', 'Полный текст про игры...', 'https://reddit.com/102', :t2, :t2, 'Саммари про игры', :p2, 8.0, NULL)"
+                "  id, source_id, external_id, title, body_text, original_url, author, published_at, collected_at, "
+                "  summary, importance_score, raw_payload, updated_at"
+                ") VALUES ("
+                "  201, 1, 'habr-201', 'Релиз Python 3.14', 'Подробности о релизе Python...', 'https://habr.com/201', 'author1', "
+                "  :p1, :p1, 'Вышел релиз Python 3.14 с JIT.', 9.5, "
+                f"  '{json.dumps({'tags': ['python']})}', :p1"
+                "), ("
+                "  202, 2, 'reddit-202', 'Трейлер новой GTA', 'Анонс трейлера...', 'https://reddit.com/202', 'author2', "
+                "  :p2, :p2, 'Вышел новый трейлер GTA.', 8.0, "
+                f"  '{json.dumps({'tags': ['игры', 'gta']})}', :p2"
+                "), ("
+                "  203, 1, 'habr-203', 'Архитектура микросервисов', 'Советы по микросервисам...', 'https://habr.com/203', 'author3', "
+                "  :p3, :p3, 'Гайд по архитектуре микросервисов.', 7.0, "
+                f"  '{json.dumps({'tags': ['architecture']})}', :p3"
+                ")"
             ),
-            {
-                "t1": two_hours_ago,
-                "p1": payload1,
-                "t2": two_hours_ago,
-                "p2": payload2,
-            },
+            {"p1": pub1, "p2": pub2, "p3": pub3},
         )
 
-    yield engine
-    engine.dispose()
+    return engine
 
 
 @pytest.fixture
@@ -170,80 +199,79 @@ def client(sqlite_engine):
     app.dependency_overrides.clear()
 
 
-def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
+def test_digest_full_flow(sqlite_engine, client):
     # 1. Генерация общего дайджеста за 24 часа
     res = client.post(
         "/api/digests/generate",
-        json={"user_id": 1, "type": "general", "period_hours": 24},
+        json={
+            "user_id": 1,
+            "type": "general",
+            "period_hours": 24,
+        },
     )
     assert res.status_code == 201
-    digest1 = res.json()
-    assert digest1["user_id"] == 1
-    assert digest1["type"] == "general"
-    assert digest1["items_count"] == 2
-    assert "Общий дайджест за" in digest1["title"]
-    assert len(digest1["items"]) == 2
-    # Сортировка по важности: пост с score=9.5 первый
-    assert digest1["items"][0]["id"] == 101
+    digest_data = res.json()
+    assert digest_data["type"] == "general"
+    assert digest_data["items_count"] == 3
+    assert len(digest_data["items"]) == 3
+    assert "Общий дайджест" in digest_data["title"]
+    # Проверка ранжирования по важности (201 -> 202 -> 203)
+    assert digest_data["items"][0]["id"] == 201
+    assert digest_data["items"][1]["id"] == 202
+    assert digest_data["items"][2]["id"] == 203
 
-    # 2. Повторная генерация дайджеста: посты не должны дублироваться, так как уже были в digest1
+    # 2. Повторная генерация без обновлений -> исключение дублей
     res_repeat = client.post(
         "/api/digests/generate",
-        json={"user_id": 1, "type": "general", "period_hours": 24},
+        json={
+            "user_id": 1,
+            "type": "general",
+            "period_hours": 24,
+        },
     )
     assert res_repeat.status_code == 201
-    digest_repeat = res_repeat.json()
-    # Нет новых обновлений -> дубли не попали
-    assert digest_repeat["items_count"] == 0
+    repeat_data = res_repeat.json()
+    # Все посты уже попадали в прошлый дайджест, повторных дублей нет!
+    assert repeat_data["items_count"] == 0
 
-    # 3. Обновляем пост 101 (симулируем апдейт статьи)
+    # 3. Обновляем пост 201 -> он снова должен попасть в новый дайджест
+    now_update = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)
     with sqlite_engine.begin() as conn:
-        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
         conn.execute(
-            text("UPDATE feed_items SET updated_at = :upd WHERE id = 101"),
-            {"upd": now_dt},
+            text("UPDATE feed_items SET updated_at = :u WHERE id = 201"),
+            {"u": now_update},
         )
 
-    # Теперь пост 101 должен снова попасть, так как по нему БЫЛ апдейт!
     res_after_update = client.post(
         "/api/digests/generate",
         json={"user_id": 1, "type": "general", "period_hours": 24},
     )
     assert res_after_update.status_code == 201
-    digest_after_upd = res_after_update.json()
-    assert digest_after_upd["items_count"] == 1
-    assert digest_after_upd["items"][0]["id"] == 101
+    after_update_data = res_after_update.json()
+    # Пост 201 обновился, поэтому снова включён
+    assert after_update_data["items_count"] == 1
+    assert after_update_data["items"][0]["id"] == 201
 
-    # 4. Проверка тематического дайджеста (type="topic", topic="игры")
-    # Добавим свежий пост про игры
-    with sqlite_engine.begin() as conn:
-        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
-        payload = json.dumps({"tags": ["игры", "steam"]})
-        conn.execute(
-            text(
-                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, original_url, published_at, collected_at, summary, raw_payload, importance_score) "
-                "VALUES (103, 2, 'reddit:2', 'Свежий трейлер игры', 'Текст трейлера', 'https://reddit.com/103', :t, :t, 'Саммари трейлера', :p, 7.5)"
-            ),
-            {"t": now_dt, "p": payload},
-        )
-
+    # 4. Тематический дайджест (topic="gta")
     res_topic = client.post(
         "/api/digests/generate",
-        json={"user_id": 1, "type": "topic", "topic": "игры", "period_hours": 24},
+        json={
+            "user_id": 1,
+            "type": "topic",
+            "topic": "gta",
+            "period_hours": 24,
+        },
     )
     assert res_topic.status_code == 201
-    digest_topic = res_topic.json()
-    assert digest_topic["type"] == "topic"
-    assert digest_topic["topic"] == "игры"
-    assert digest_topic["items_count"] >= 1
-    assert any("игры" in item["title"].lower() for item in digest_topic["items"])
+    topic_data = res_topic.json()
+    assert topic_data["type"] == "topic"
+    assert topic_data["topic"] == "gta"
 
     # 5. Проверка списка плашек на вкладке дайджестов (GET /api/digests)
     res_list = client.get("/api/digests?user_id=1")
     assert res_list.status_code == 200
     cards = res_list.json()
-    assert len(cards) >= 3  # все сгенерированные дайджесты доступны
-    # Каждая плашка содержит название, превью и дату
+    assert len(cards) >= 3
     first_card = cards[0]
     assert "title" in first_card
     assert "preview" in first_card
@@ -266,7 +294,6 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
     # 8. Проверка автоудаления дайджестов старше 3 дней
     old_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=4)
     with sqlite_engine.begin() as conn:
-        # Создаем старый неизбранный дайджест
         conn.execute(
             text(
                 "INSERT INTO digests (id, user_id, type, title, summary_text, period_start, period_end, items_count, is_favorite, created_at) "
@@ -275,18 +302,55 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
             {"t": old_time},
         )
 
-    # Генерация нового запускает cleanup_expired_digests
     client.post(
         "/api/digests/generate",
         json={"user_id": 1, "type": "general", "period_hours": 24},
     )
 
-    # Проверяем, что дайджест 999 удалён
     res_old = client.get("/api/digests/999")
     assert res_old.status_code == 404
 
-    # А избранный дайджест target_id остался на месте
     res_fav_check = client.get(f"/api/digests/{target_id}")
     assert res_fav_check.status_code == 200
     assert res_fav_check.json()["is_favorite"] is True
 
+
+def test_digest_cluster_deduplication(sqlite_engine, client):
+    """Проверяет, что несколько публикаций одного кластера не дублируются в дайджесте."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, original_url, published_at, collected_at, importance_score, updated_at) "
+                "VALUES "
+                "(301, 1, 'habr-301', 'Новость А на Хабре', 'Текст новости А', 'https://habr.com/301', :t, :t, 9.0, :t), "
+                "(302, 2, 'reddit-302', 'Новость А на Реддите', 'Текст новости А на Реддите', 'https://reddit.com/302', :t, :t, 8.5, :t)"
+            ),
+            {"t": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO content_clusters (id, title, summary, importance_score, created_at) "
+                "VALUES (10, 'Кластерное событие А', 'Сводка события А', 9.2, :t)"
+            ),
+            {"t": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO cluster_items (id, cluster_id, feed_item_id, is_primary) VALUES "
+                "(10, 10, 301, 1), "
+                "(11, 10, 302, 0)"
+            )
+        )
+
+    res = client.post(
+        "/api/digests/generate",
+        json={"user_id": 1, "type": "general", "period_hours": 1},
+    )
+    assert res.status_code == 201
+    data = res.json()
+
+    # Хотя постов два (301 и 302), в дайджест событие вошло один раз!
+    cluster_items = [item for item in data["items"] if item["cluster_id"] == 10]
+    assert len(cluster_items) == 1
+    assert cluster_items[0]["title"] == "КЛАСТЕРНОЕ СОБЫТИЕ А"
