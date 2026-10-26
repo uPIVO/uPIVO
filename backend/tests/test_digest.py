@@ -90,6 +90,7 @@ def sqlite_engine():
                 "  period_start DATETIME NOT NULL,"
                 "  period_end DATETIME NOT NULL,"
                 "  items_count INTEGER NOT NULL DEFAULT 0,"
+                "  items_snapshot JSON NOT NULL,"
                 "  is_favorite BOOLEAN NOT NULL DEFAULT 0,"
                 "  created_at DATETIME"
                 ")"
@@ -312,8 +313,9 @@ def test_digest_full_lifecycle(client: TestClient, sqlite_engine):
         conn.execute(
             text(
                 "INSERT INTO digests (id, user_id, type, title, summary_text, "
-                "period_start, period_end, items_count, is_favorite, created_at) "
-                "VALUES (999, 1, 'general', 'Очень старый дайджест', 'Текст', :t, :t, 0, 0, :t)"
+                "period_start, period_end, items_count, items_snapshot, is_favorite, created_at) "
+                "VALUES (999, 1, 'general', 'Очень старый дайджест', "
+                "'Текст', :t, :t, 0, '[]', 0, :t)"
             ),
             {"t": old_time},
         )
@@ -397,7 +399,8 @@ def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
                 "  id, source_id, external_id, title, body_text, original_url, "
                 "published_at, collected_at, summary, importance_score, processing_status"
                 ") VALUES "
-                "  (106, 3, 'tg:106', 'TG: Вышел релиз Python 3.14', 'Текст в телеге про релиз...', "
+                "  (106, 3, 'tg:106', 'TG: Вышел релиз Python 3.14', "
+                "'Текст в телеге про релиз...', "
                 "'https://t.me/py_chan/106', :pub, :col, 'TG саммари', 9.0, 'normalized')"
             ),
             {"pub": one_hour_ago, "col": one_hour_ago},
@@ -406,8 +409,10 @@ def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
         # Create ContentCluster for the story
         conn.execute(
             text(
-                "INSERT INTO content_clusters (id, title, summary, importance_score, created_at) VALUES "
-                "(1, 'Инфоповод: Релиз Python 3.14', 'Сводка кластера: вышел новый Python.', 9.5, CURRENT_TIMESTAMP)"
+                "INSERT INTO content_clusters "
+                "(id, title, summary, importance_score, created_at) VALUES "
+                "(1, 'Инфоповод: Релиз Python 3.14', "
+                "'Сводка кластера: вышел новый Python.', 9.5, CURRENT_TIMESTAMP)"
             )
         )
 
@@ -429,7 +434,7 @@ def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
     data = res.json()
 
     # User 3 has items 101 (Habr), 102 (Reddit), 106 (Telegram).
-    # Since 101 and 106 belong to the same cluster, there should be 2 cards (Cluster 1 + Item 102), not 3!
+    # Items 101 and 106 share a cluster: two cards (cluster 1 and item 102).
     assert data["items_count"] == 2
     assert len(data["items"]) == 2
 
@@ -448,4 +453,52 @@ def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
     detail_data = res_detail.json()
     assert detail_data["items_count"] == 2
     assert len(detail_data["items"]) == 2
+
+    # Tomorrow's cluster can grow and change without rewriting yesterday's digest.
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE content_clusters SET title = 'Обновлённый инфоповод', "
+                "summary = 'Новая сводка кластера' WHERE id = 1"
+            )
+        )
+        conn.execute(text("UPDATE sources SET name = 'Habr updated' WHERE id = 1"))
+        conn.execute(text("UPDATE feed_items SET title = 'Новый заголовок' WHERE id = 101"))
+        conn.execute(
+            text(
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
+                "original_url, published_at, collected_at, summary, processing_status) "
+                "VALUES (107, 3, 'tg:107', 'Новая публикация', 'Новый текст', "
+                "'https://t.me/py_chan/107', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, "
+                "'Новая публикация в кластере', 'normalized')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO cluster_items (id, cluster_id, feed_item_id, is_primary) "
+                "VALUES (3, 1, 107, 0)"
+            )
+        )
+
+    old_detail = client.get(f"/api/digests/{digest_id}?user_id=3")
+    assert old_detail.status_code == 200
+    assert old_detail.json() == detail_data
+
+    new_response = client.post(
+        "/api/digests/generate",
+        json={"user_id": 3, "type": "general", "period_hours": 24},
+    )
+    assert new_response.status_code == 201
+    new_digest = new_response.json()
+    assert new_digest["items_count"] == 1
+    new_cluster = new_digest["items"][0]
+    assert new_cluster["cluster_id"] == 1
+    assert new_cluster["title"] == "Обновлённый инфоповод"
+    assert new_cluster["summary"] == "Новая сводка кластера"
+    assert new_cluster["items_count"] == 3
+    assert {source["name"] for source in new_cluster["related_sources"]} == {
+        "Habr updated",
+        "Python TG",
+    }
+    assert client.get(f"/api/digests/{digest_id}?user_id=3").json() == detail_data
 

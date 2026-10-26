@@ -96,7 +96,9 @@ class DigestService:
 
         # Сортировка: важность (importance_score), затем дата публикации
         base_query = base_query.order_by(
-            func.coalesce(ContentCluster.importance_score, FeedItem.importance_score).desc().nulls_last(),
+            func.coalesce(ContentCluster.importance_score, FeedItem.importance_score)
+            .desc()
+            .nulls_last(),
             FeedItem.published_at.desc().nulls_last(),
             FeedItem.id.desc(),
         )
@@ -135,13 +137,6 @@ class DigestService:
                 cluster_importance,
             ) = row
 
-            if feed_item.id in previously_included:
-                last_seen_update = previously_included[feed_item.id]
-                if not feed_item.updated_at:
-                    continue
-                if last_seen_update and feed_item.updated_at <= last_seen_update:
-                    continue
-
             if cluster_id is not None:
                 if cluster_id in cluster_map:
                     card = story_cards[cluster_map[cluster_id]]
@@ -177,6 +172,23 @@ class DigestService:
                     }
                 )
 
+        # A new member makes the matching cluster card eligible again. Keep already
+        # seen members that also passed the period, topic and subscription filters.
+        def is_new_or_updated(item: FeedItem) -> bool:
+            if item.id not in previously_included:
+                return True
+            last_seen_update = previously_included[item.id]
+            return bool(
+                item.updated_at
+                and (last_seen_update is None or item.updated_at > last_seen_update)
+            )
+
+        story_cards = [
+            card
+            for card in story_cards
+            if any(is_new_or_updated(item) for item, _, _ in card["feed_items"])
+        ]
+
         # Ограничиваем топ материалов для одного дайджеста (топ-15 наиболее важных событий)
         story_cards = story_cards[:15]
 
@@ -207,7 +219,9 @@ class DigestService:
                 summary_text = primary_item.summary
                 if not summary_text:
                     raw_body = (primary_item.body_text or "").strip()
-                    summary_text = raw_body[:250].rstrip() + "..." if len(raw_body) > 250 else raw_body
+                    summary_text = (
+                        raw_body[:250].rstrip() + "..." if len(raw_body) > 250 else raw_body
+                    )
 
             # Related sources
             seen_source_ids = set()
@@ -267,6 +281,7 @@ class DigestService:
             period_start=period_start,
             period_end=period_end,
             items_count=len(selected_card_items),
+            items_snapshot=[item.model_dump(mode="json") for item in selected_card_items],
             is_favorite=False,
             created_at=now,
         )
@@ -349,28 +364,20 @@ class DigestService:
         if digest is None or digest.user_id != user_id:
             return None
 
-        # Получаем вошедшие посты и их кластеры
-        items_query = (
-            select(
-                FeedItem,
-                Source,
-                ClusterItem.cluster_id,
-                ClusterItem.is_primary,
-                ContentCluster.title.label("cluster_title"),
-                ContentCluster.summary.label("cluster_summary"),
-            )
-            .join(DigestItem, DigestItem.feed_item_id == FeedItem.id)
-            .join(Source, FeedItem.source_id == Source.id)
-            .outerjoin(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
-            .outerjoin(ContentCluster, ContentCluster.id == ClusterItem.cluster_id)
-            .where(DigestItem.digest_id == digest.id)
-            .order_by(
-                FeedItem.importance_score.desc().nulls_last(),
-                FeedItem.published_at.desc().nulls_last(),
-            )
+        return DigestDetailResponse(
+            id=digest.id,
+            user_id=digest.user_id,
+            type=digest.type,
+            title=digest.title,
+            topic=digest.topic,
+            summary_text=digest.summary_text,
+            period_start=digest.period_start,
+            period_end=digest.period_end,
+            items_count=digest.items_count,
+            is_favorite=digest.is_favorite,
+            created_at=digest.created_at,
+            items=[FeedItemListItem.model_validate(item) for item in digest.items_snapshot],
         )
-        rows = self.db.execute(items_query).all()
-        return self._to_detail_response_from_rows(digest, rows)
 
     def toggle_favorite(self, user_id: int, digest_id: int) -> bool | None:
         """Переключить флаг избранного у дайджеста. Избранные не удаляются через 3 дня."""
@@ -415,12 +422,10 @@ class DigestService:
 
         for idx, card in enumerate(cards, 1):
             primary_item: FeedItem = card["primary_item"]
-            primary_source: Source = card["primary_source"]
             if card["is_cluster"]:
-                for f_item, src, is_prim in card["feed_items"]:
+                for f_item, _, is_prim in card["feed_items"]:
                     if is_prim:
                         primary_item = f_item
-                        primary_source = src
                         break
 
             if card["is_cluster"] and card["cluster_title"]:
@@ -457,116 +462,3 @@ class DigestService:
             )
 
         return "\n\n".join(lines)
-
-    def _to_detail_response_from_rows(
-        self, digest: Digest, rows: list[tuple]
-    ) -> DigestDetailResponse:
-        """Преобразование модели Digest и связанных публикаций с группировкой по кластерам."""
-        cards: list[dict] = []
-        cluster_index_map: dict[int, int] = {}
-
-        for row in rows:
-            feed_item, source, cluster_id, is_primary, cluster_title, cluster_summary = row
-            if cluster_id is not None:
-                if cluster_id in cluster_index_map:
-                    c = cards[cluster_index_map[cluster_id]]
-                    c["feed_items"].append((feed_item, source, bool(is_primary)))
-                    if is_primary:
-                        c["primary_item"] = feed_item
-                        c["primary_source"] = source
-                else:
-                    cluster_index_map[cluster_id] = len(cards)
-                    cards.append(
-                        {
-                            "is_cluster": True,
-                            "cluster_id": cluster_id,
-                            "cluster_title": cluster_title,
-                            "cluster_summary": cluster_summary,
-                            "primary_item": feed_item,
-                            "primary_source": source,
-                            "feed_items": [(feed_item, source, bool(is_primary))],
-                        }
-                    )
-            else:
-                cards.append(
-                    {
-                        "is_cluster": False,
-                        "cluster_id": None,
-                        "cluster_title": None,
-                        "cluster_summary": None,
-                        "primary_item": feed_item,
-                        "primary_source": source,
-                        "feed_items": [(feed_item, source, False)],
-                    }
-                )
-
-        feed_items_list: list[FeedItemListItem] = []
-        for card in cards:
-            primary_item: FeedItem = card["primary_item"]
-            primary_source: Source = card["primary_source"]
-            if card["is_cluster"]:
-                for f_item, src, is_prim in card["feed_items"]:
-                    if is_prim:
-                        primary_item = f_item
-                        primary_source = src
-                        break
-
-            if card["is_cluster"] and card["cluster_title"]:
-                title_text = card["cluster_title"].strip()
-            else:
-                title_text = (primary_item.title or "Без названия").strip()
-
-            if card["is_cluster"] and card["cluster_summary"]:
-                summary_text = card["cluster_summary"].strip()
-            else:
-                summary_text = primary_item.summary
-                if not summary_text:
-                    raw_body = (primary_item.body_text or "").strip()
-                    summary_text = raw_body[:250] + "..." if len(raw_body) > 250 else raw_body
-
-            seen_source_ids = set()
-            related_sources: list[SourceBrief] = []
-            for _, src, _ in card["feed_items"]:
-                if src.id not in seen_source_ids:
-                    seen_source_ids.add(src.id)
-                    related_sources.append(
-                        SourceBrief(
-                            id=src.id,
-                            name=src.name,
-                            type=src.type,
-                        )
-                    )
-
-            feed_items_list.append(
-                FeedItemListItem(
-                    id=primary_item.id,
-                    title=title_text,
-                    summary=summary_text,
-                    published_at=primary_item.published_at,
-                    source=SourceBrief(
-                        id=primary_source.id,
-                        name=primary_source.name,
-                        type=primary_source.type,
-                    ),
-                    original_url=primary_item.original_url,
-                    is_cluster=card["is_cluster"],
-                    cluster_id=card["cluster_id"],
-                    items_count=len(card["feed_items"]),
-                    related_sources=related_sources,
-                )
-            )
-
-        return DigestDetailResponse(
-            id=digest.id,
-            user_id=digest.user_id,
-            type=digest.type,
-            title=digest.title,
-            topic=digest.topic,
-            summary_text=digest.summary_text,
-            period_start=digest.period_start,
-            period_end=digest.period_end,
-            items_count=digest.items_count,
-            is_favorite=digest.is_favorite,
-            created_at=digest.created_at,
-            items=feed_items_list,
-        )

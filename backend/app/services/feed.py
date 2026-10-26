@@ -2,7 +2,7 @@
 
 import logging
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster

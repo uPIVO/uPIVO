@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -39,6 +40,7 @@ class Digest(Base):
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     items_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    items_snapshot: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), nullable=False, server_default=text("CURRENT_TIMESTAMP")

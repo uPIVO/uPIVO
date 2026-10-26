@@ -293,7 +293,8 @@ def test_feed_cluster_deduplication_into_single_card(client: TestClient, sqlite_
         conn.execute(
             text(
                 "INSERT INTO content_clusters (id, title, summary, created_at) VALUES "
-                "(1, 'Большой релиз Python 3.14', 'Сводная выжимка: вышел релиз языка Python.', CURRENT_TIMESTAMP)"
+                "(1, 'Большой релиз Python 3.14', "
+                "'Сводная выжимка: вышел релиз языка Python.', CURRENT_TIMESTAMP)"
             )
         )
 

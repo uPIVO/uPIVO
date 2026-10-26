@@ -19,10 +19,13 @@ class FeedItemListItem(BaseModel):
     title: str = Field(description="Название поста с исходным регистром")
     summary: str = Field(description="Краткое изложение поста (саммари от ИИ или выдержка)")
     published_at: datetime | None = Field(default=None, description="Дата и время поста")
-    source: SourceBrief = Field(description="Источник публикации (для кластера — основной источник)")
+    source: SourceBrief = Field(
+        description="Источник публикации (для кластера — основной источник)"
+    )
     original_url: str = Field(description="Ссылка на оригинальный пост")
     is_cluster: bool = Field(
-        default=False, description="Признак: объединяет ли карточка несколько публикаций одного инфоповода"
+        default=False,
+        description="Признак: объединяет ли карточка несколько публикаций одного инфоповода",
     )
     cluster_id: int | None = Field(
         default=None, description="Идентификатор кластера, если карточка является кластером"
