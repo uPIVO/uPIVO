@@ -115,6 +115,18 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_favorites_user_feed ON favorites(user_id, target_type, feed_item_id) "
+                "WHERE feed_item_id IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_favorites_user_cluster ON favorites(user_id, target_type, cluster_id) "
+                "WHERE cluster_id IS NOT NULL"
+            )
+        )
 
         # Users: User 1 and User 2
         conn.execute(
@@ -401,3 +413,127 @@ def test_delete_favorite_by_target(client):
 
     favs = client.get("/api/favorites", headers=headers).json()
     assert favs["total"] == 0
+
+
+def test_add_favorite_conflicting_target_id_and_feed_item_id(client):
+    """POST /api/favorites with conflicting target_id and feed_item_id returns 422."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_id": 1, "feed_item_id": 2},
+    )
+    assert r.status_code == 422
+    assert "must match" in r.text or "Contradictory" in r.text
+
+
+def test_add_favorite_conflicting_target_id_and_cluster_id(client):
+    """POST /api/favorites with conflicting target_id and cluster_id returns 422."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_id": 10, "cluster_id": 20},
+    )
+    assert r.status_code == 422
+    assert "must match" in r.text or "Contradictory" in r.text
+
+
+def test_add_favorite_conflicting_feed_item_and_cluster(client):
+    """POST /api/favorites with both feed_item_id and cluster_id returns 422."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"feed_item_id": 1, "cluster_id": 10},
+    )
+    assert r.status_code == 422
+    assert "cannot specify both" in r.text or "Contradictory" in r.text
+
+
+def test_add_favorite_conflicting_type_feed_item_with_cluster_id(client):
+    """POST /api/favorites with target_type=feed_item and cluster_id returns 422."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_type": "feed_item", "cluster_id": 10},
+    )
+    assert r.status_code == 422
+    assert "cluster_id cannot be used" in r.text or "Contradictory" in r.text
+
+
+def test_add_favorite_conflicting_type_cluster_with_feed_item_id(client):
+    """POST /api/favorites with target_type=cluster and feed_item_id returns 422."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_type": "cluster", "feed_item_id": 1},
+    )
+    assert r.status_code == 422
+    assert "feed_item_id cannot be used" in r.text or "Contradictory" in r.text
+
+
+def test_add_favorite_matching_target_id_and_feed_item_id_succeeds(client):
+    """POST /api/favorites with matching target_id and feed_item_id succeeds."""
+    headers = {"Authorization": "Bearer 1"}
+    r = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_id": 1, "feed_item_id": 1, "note": "Valid match"},
+    )
+    assert r.status_code == 201
+    data = r.json()
+    assert data["target_id"] == 1
+    assert data["feed_item_id"] == 1
+    assert data["note"] == "Valid match"
+
+
+def test_add_favorite_concurrency_integrity_error_handled(client, monkeypatch):
+    """
+    Simulate a race condition where a concurrent request inserts the favorite
+    between initial check and insert, raising IntegrityError on flush.
+    Service must handle conflict gracefully and return 200 OK without 500.
+    """
+    from app.services.favorites import FavoritesService
+
+    headers = {"Authorization": "Bearer 1"}
+
+    original_find = FavoritesService._find_favorite
+    call_count = 0
+
+    def mock_find_favorite(self, user_id, target_type, target_id):
+        nonlocal call_count
+        call_count += 1
+        # On first check, simulate that record is not found yet (race condition window)
+        if call_count == 1:
+            # Simultaneously, another worker commits the favorite to DB in parallel
+            from app.models.favorite import Favorite
+            from app.models.enums import FavoriteTargetType
+            concurrent_fav = Favorite(
+                user_id=user_id,
+                target_type=FavoriteTargetType.FEED_ITEM,
+                feed_item_id=4,
+                note="Concurrent worker note",
+            )
+            self.db.add(concurrent_fav)
+            self.db.commit()
+            return None
+        # On subsequent calls (recovery after IntegrityError), return the committed favorite
+        return original_find(self, user_id, target_type, target_id)
+
+    monkeypatch.setattr(FavoritesService, "_find_favorite", mock_find_favorite)
+
+    res_concurrent = client.post(
+        "/api/favorites",
+        headers=headers,
+        json={"target_type": "feed_item", "target_id": 4, "note": "Second request note"},
+    )
+    # Must NOT return 500 Internal Server Error
+    assert res_concurrent.status_code == 200
+    data = res_concurrent.json()
+    assert data["target_id"] == 4
+    # Note must NOT be overwritten by the second concurrent request
+    assert data["note"] == "Concurrent worker note"
+

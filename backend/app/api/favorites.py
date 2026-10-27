@@ -4,6 +4,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user_id
@@ -54,6 +55,26 @@ def add_to_favorites(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Публикация или инфоповод не найдены или недоступны",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except IntegrityError as exc:
+        logger.warning(
+            "IntegrityError in add_to_favorites for user_id=%s, attempting recovery: %s",
+            user_id,
+            exc,
+        )
+        db.rollback()
+        fav_item = service._find_favorite(user_id, payload.target_type, payload.target_id)
+        if fav_item:
+            response.status_code = status.HTTP_200_OK
+            return service._build_favorite_response(fav_item)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Конфликт сохранения в избранное",
         ) from exc
 
 

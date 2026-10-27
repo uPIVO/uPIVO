@@ -3,6 +3,7 @@
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster
@@ -91,12 +92,32 @@ class FavoritesService:
             )
         return cluster[0]
 
+    def _find_favorite(
+        self, user_id: int, target_type: FavoriteTargetType, target_id: int
+    ) -> Favorite | None:
+        """Find an existing favorite record for a user and target."""
+        if target_type == FavoriteTargetType.FEED_ITEM:
+            stmt = select(Favorite).where(
+                Favorite.user_id == user_id,
+                Favorite.target_type == FavoriteTargetType.FEED_ITEM,
+                Favorite.feed_item_id == target_id,
+            )
+        else:
+            stmt = select(Favorite).where(
+                Favorite.user_id == user_id,
+                Favorite.target_type == FavoriteTargetType.CLUSTER,
+                Favorite.cluster_id == target_id,
+            )
+        return self.db.execute(stmt).scalar_one_or_none()
+
     def add_favorite(
         self, user_id: int, payload: FavoriteCreateRequest
     ) -> tuple[FavoriteItemResponse, bool]:
         """
         Save an item or cluster to favorites:
+        - Validates parameters against contradictions.
         - Checks content availability per feed logic.
+        - Handles concurrent duplicate requests without IntegrityError / HTTP 500.
         - If already saved, returns existing favorite with 200 without overwriting note.
         - If new, creates favorite and returns 201.
         Returns: (FavoriteItemResponse, is_new: bool)
@@ -105,33 +126,85 @@ class FavoritesService:
 
         target_type = payload.target_type
         target_id = payload.target_id
-        assert target_id is not None
+        if target_id is None:
+            raise ValueError("Must provide either target_id, feed_item_id, or cluster_id")
+
+        # Validate contradictory parameters
+        if payload.feed_item_id is not None and payload.cluster_id is not None:
+            raise ValueError(
+                "Contradictory parameters: cannot specify both feed_item_id and cluster_id"
+            )
+        if payload.feed_item_id is not None and target_id != payload.feed_item_id:
+            raise ValueError(
+                f"Contradictory parameters: target_id ({target_id}) and feed_item_id ({payload.feed_item_id}) must match"
+            )
+        if payload.cluster_id is not None and target_id != payload.cluster_id:
+            raise ValueError(
+                f"Contradictory parameters: target_id ({target_id}) and cluster_id ({payload.cluster_id}) must match"
+            )
+        if target_type == FavoriteTargetType.FEED_ITEM and payload.cluster_id is not None:
+            raise ValueError(
+                "Contradictory parameters: cluster_id cannot be used with target_type='feed_item'"
+            )
+        if target_type == FavoriteTargetType.CLUSTER and payload.feed_item_id is not None:
+            raise ValueError(
+                "Contradictory parameters: feed_item_id cannot be used with target_type='cluster'"
+            )
 
         # Check availability on creation
         if target_type == FavoriteTargetType.FEED_ITEM:
             self.check_feed_item_available(user_id, target_id)
-            existing = self.db.execute(
-                select(Favorite).where(
-                    Favorite.user_id == user_id,
-                    Favorite.target_type == FavoriteTargetType.FEED_ITEM,
-                    Favorite.feed_item_id == target_id,
-                )
-            ).scalar_one_or_none()
         else:
             self.check_cluster_available(user_id, target_id)
-            existing = self.db.execute(
-                select(Favorite).where(
-                    Favorite.user_id == user_id,
-                    Favorite.target_type == FavoriteTargetType.CLUSTER,
-                    Favorite.cluster_id == target_id,
-                )
-            ).scalar_one_or_none()
 
+        existing = self._find_favorite(user_id, target_type, target_id)
         if existing:
             # Idempotent: return existing without modifying note
             return self._build_favorite_response(existing), False
 
-        # Create new favorite
+        # Support native ON CONFLICT for PostgreSQL if applicable
+        dialect_name = getattr(getattr(self.db, "bind", None), "dialect", None)
+        dialect_name = getattr(dialect_name, "name", "")
+
+        if dialect_name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            index_elements = (
+                [Favorite.user_id, Favorite.target_type, Favorite.feed_item_id]
+                if target_type == FavoriteTargetType.FEED_ITEM
+                else [Favorite.user_id, Favorite.target_type, Favorite.cluster_id]
+            )
+            stmt = (
+                pg_insert(Favorite)
+                .values(
+                    user_id=user_id,
+                    target_type=target_type,
+                    feed_item_id=target_id if target_type == FavoriteTargetType.FEED_ITEM else None,
+                    cluster_id=target_id if target_type == FavoriteTargetType.CLUSTER else None,
+                    note=payload.note,
+                )
+                .on_conflict_do_nothing(index_elements=index_elements)
+                .returning(Favorite.id)
+            )
+            try:
+                inserted_id = self.db.scalar(stmt)
+                self.db.commit()
+                if inserted_id is None:
+                    # Concurrently saved by another request
+                    existing = self._find_favorite(user_id, target_type, target_id)
+                    if existing is None:
+                        raise IntegrityError("Failed to retrieve existing favorite after conflict", None, None)
+                    return self._build_favorite_response(existing), False
+                fav = self.db.get(Favorite, inserted_id)
+                return self._build_favorite_response(fav), True
+            except IntegrityError:
+                self.db.rollback()
+                existing = self._find_favorite(user_id, target_type, target_id)
+                if existing:
+                    return self._build_favorite_response(existing), False
+                raise
+
+        # Cross-dialect fallback (SQLite in tests, etc.) with savepoint concurrency guard
         fav = Favorite(
             user_id=user_id,
             target_type=target_type,
@@ -139,10 +212,23 @@ class FavoritesService:
             cluster_id=target_id if target_type == FavoriteTargetType.CLUSTER else None,
             note=payload.note,
         )
-        self.db.add(fav)
+        try:
+            with self.db.begin_nested():
+                self.db.add(fav)
+                self.db.flush()
+            is_new = True
+        except IntegrityError:
+            if fav in self.db:
+                self.db.expunge(fav)
+            existing = self._find_favorite(user_id, target_type, target_id)
+            if existing is None:
+                raise
+            fav = existing
+            is_new = False
+
         self.db.commit()
         self.db.refresh(fav)
-        return self._build_favorite_response(fav), True
+        return self._build_favorite_response(fav), is_new
 
     def get_user_favorites(
         self,
