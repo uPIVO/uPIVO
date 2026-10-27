@@ -39,6 +39,12 @@ Shared ingestion: enabled `user_sources` → DISTINCT `sources` → sync source 
 User layer: `User` → `UserSource` → персональная лента и дайджест;
 `Folder` классифицирует общие публикации для пользователя.
 Персональные действия не создают копии публикаций в `feed_items`.
+`UserInterest` хранит необязательный глобальный список интересов пользователя.
+Пустой список — штатное состояние: персональная оценка не выполняется, а материалы
+включённых источников остаются доступны без персональной фильтрации.
+DB-backed оценка по интересам переиспользует `ContentUnitAnalysisUseCase` и
+`user_item_scores`; правила и стык с ITD-85 описаны в
+[документации интересов](user-interests.md).
 
 Общая модель FeedItem хранит `raw_payload JSONB` — исходные данные источника;
 `extracted_entities JSONB` предназначено для hashtags, mentions, URLs, tools/products
@@ -96,15 +102,15 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 
 ## Границы кода
 
-- `api`: HTTP-маршруты здоровья, Habr, источников и тем
-  (`/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`), ленты
-  (`/api/feed`) и дайджестов (`/api/digests`).
+- `api`: HTTP-маршруты здоровья, Habr, источников, тем и интересов
+  (`/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`,
+  `/api/users/{user_id}/interests`), ленты (`/api/feed`) и дайджестов (`/api/digests`).
   Авторизации нет: в пути передаётся `users.id`.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
-- `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
-  `ClusterItem` / `Folder` / `FeedItemFolder` / `Digest` / `DigestItem` /
-  `UserItemScore` и состояния синхронизации Telegram и Reddit.
+- `models`: ORM `User` / `UserSource` / `UserInterest` / `Source` / `FeedItem` /
+  `ContentCluster` / `ClusterItem` / `Folder` / `FeedItemFolder` / `Digest` /
+  `DigestItem` / `UserItemScore` и состояния синхронизации Telegram и Reddit.
   Папка — тема общей ленты, не копия публикаций и не избранное.
   `Digest.items_snapshot` хранит готовые карточки на момент создания; `DigestItem`
   сохраняет связи с публикациями для исключения повторов в следующих дайджестах.
@@ -122,7 +128,8 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 - `pipeline`: один процесс `python -m app.pipeline --user` — сбор, нормализация,
   склейка. Summary не вызывается.
 - `ai`: provider-neutral интерфейс и ручные сценарии анализа FeedItem.
-- `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
+- `workers`: конфигурация Celery и фоновые задачи персональной оценки по интересам;
+  расписаний и общего конвейера пока нет.
 - `auth`: зарезервировано; схема авторизации не выбрана.
 
 API не подключается к БД при импорте/старте. `/health` проверяет процесс,

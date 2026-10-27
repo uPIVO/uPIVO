@@ -612,30 +612,52 @@ class ContentUnitAnalysisRepository:
         self, session: Session, unit_id: int, *, kind: str = "feed_item"
     ) -> bool:
         rows = session.scalars(
-            select(UserItemScore).where(self._score_target(kind, unit_id)).with_for_update()
+            select(UserItemScore)
+            .where(self._score_target(kind, unit_id))
+            .order_by(UserItemScore.id)
+            .with_for_update()
         ).all()
         changed = False
         for row in rows:
-            metadata = self._read_score_metadata(row)
-            history = metadata.relevance
-            if history.last_good is not None:
-                if history.last_good.status != "stale":
-                    changed = True
-                history = history.model_copy(
-                    update={"last_good": history.last_good.model_copy(update={"status": "stale"})}
-                )
-            if (
-                row.relevance_score is not None
-                or row.rank_score is not None
-                or row.reason is not None
-            ):
+            changed = self._invalidate_score_row(row) or changed
+        return changed
+
+    def invalidate_user_relevance(self, session: Session, *, user_id: int) -> bool:
+        """Инвалидирует текущие персональные оценки пользователя, сохраняя историю.
+
+        Вызывается в транзакции изменения интересов: строка `users` уже
+        заблокирована вызывающей стороной. `relevance_score` становится NULL,
+        а не нулём: отсутствие актуальной оценки не равно низкой релевантности.
+        """
+        rows = session.scalars(
+            select(UserItemScore)
+            .where(UserItemScore.user_id == user_id)
+            .order_by(UserItemScore.id)
+            .with_for_update()
+        ).all()
+        changed = False
+        for row in rows:
+            changed = self._invalidate_score_row(row) or changed
+        return changed
+
+    def _invalidate_score_row(self, row: UserItemScore) -> bool:
+        metadata = self._read_score_metadata(row)
+        history = metadata.relevance
+        changed = False
+        if history.last_good is not None:
+            if history.last_good.status != "stale":
                 changed = True
-            row.relevance_score = None
-            row.rank_score = None
-            row.reason = None
-            updated_metadata = UserItemScoreAIMetadata(relevance=history)
-            if updated_metadata != metadata:
-                self._write_score_metadata(row, updated_metadata)
+            history = history.model_copy(
+                update={"last_good": history.last_good.model_copy(update={"status": "stale"})}
+            )
+        if row.relevance_score is not None or row.rank_score is not None or row.reason is not None:
+            changed = True
+        row.relevance_score = None
+        row.rank_score = None
+        row.reason = None
+        updated_metadata = UserItemScoreAIMetadata(relevance=history)
+        if updated_metadata != metadata:
+            self._write_score_metadata(row, updated_metadata)
         return changed
 
     @staticmethod

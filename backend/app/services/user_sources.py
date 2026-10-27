@@ -60,7 +60,11 @@ def attach_source(
     source = _get_or_create_source(session, identity)
     link, created = _get_or_create_link(session, user_id, source.id)
     response = _link_response(link, source)
+    activated = created and link.enabled
+    source_id = source.id
     _commit(session)
+    if activated:
+        _notify_source_activated(user_id, source_id)
     return response, created
 
 
@@ -80,9 +84,12 @@ def set_source_enabled(
     source = session.get(Source, source_id)
     if source is None:
         raise UnknownSourceLinkError(source_id)
+    changed_to_enabled = enabled and not link.enabled
     link.enabled = enabled
     response = _link_response(link, source)
     _commit(session)
+    if changed_to_enabled:
+        _notify_source_activated(user_id, source_id)
     return response
 
 
@@ -307,6 +314,13 @@ def _link_response(link: UserSource, source: Source) -> SourceLinkResponse:
         external_id=source.external_id,
         created_at=link.created_at,
     )
+
+
+def _notify_source_activated(user_id: int, source_id: int) -> None:
+    """Узкий хук: только фоновый пересчёт непросмотренного, без правок публикаций."""
+    from app.services.user_relevance import notify_source_activated
+
+    notify_source_activated(user_id, source_id)
 
 
 def _commit(session: Session) -> None:
