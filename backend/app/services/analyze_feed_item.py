@@ -124,9 +124,18 @@ class ContentUnitAnalysisUseCase:
         summarization_service: SummarizationService | None = None,
         importance_service: ImportanceService | None = None,
         relevance_service: RelevanceService | None = None,
+        max_attempts: int = 2,
     ) -> None:
+        """Собрать сценарий анализа одной единицы контента.
+
+        `max_attempts` ограничивает внутренние повторы при устаревшем результате
+        обработки контента. Путь с интересами из БД передаёт 1: он сам перечитывает
+        актуальный список интересов и повторяет оценку, не тратя лишний AI-вызов.
+        """
         if kind not in ("feed_item", "cluster"):
             raise ValueError("kind должен иметь значение 'feed_item' или 'cluster'.")
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ValueError("Количество попыток анализа должно быть положительным целым числом.")
 
         self._session_factory = session_factory
         self._repository = repository if repository is not None else ContentUnitAnalysisRepository()
@@ -134,6 +143,7 @@ class ContentUnitAnalysisUseCase:
         self._summarization_service = summarization_service
         self._importance_service = importance_service
         self._relevance_service = relevance_service
+        self._max_attempts = max_attempts
 
     async def run(
         self,
@@ -149,7 +159,7 @@ class ContentUnitAnalysisUseCase:
         validated_interests = self._validate_context(analysis_operation, user_id, interests)
         self._require_services(analysis_operation)
 
-        for attempt in range(1, 3):
+        for attempt in range(1, self._max_attempts + 1):
             if analysis_operation.requires_user_context:
                 self._ensure_user(user_id)
 
@@ -198,7 +208,7 @@ class ContentUnitAnalysisUseCase:
                         relevance=self._skipped_step(analysis_operation.includes_relevance),
                     )
                 if summary_step.status is AnalysisStatus.STALE_CANDIDATE:
-                    if attempt == 1:
+                    if attempt < self._max_attempts:
                         continue
                     return self._outcome(
                         unit_id,
@@ -233,7 +243,7 @@ class ContentUnitAnalysisUseCase:
                 )
                 operation_failed = operation_failed or failed
                 if stale:
-                    if attempt == 1 and not operation_failed:
+                    if attempt < self._max_attempts and not operation_failed:
                         continue
                     return self._outcome(
                         unit_id,
@@ -257,7 +267,7 @@ class ContentUnitAnalysisUseCase:
                 operation_failed = operation_failed or failed
                 stale_candidate_saved = stale_candidate_saved or stale
 
-            if stale_candidate_saved and attempt == 1 and not operation_failed:
+            if stale_candidate_saved and attempt < self._max_attempts and not operation_failed:
                 continue
             return self._outcome(
                 unit_id,
@@ -612,6 +622,7 @@ class FeedItemAnalysisUseCase(ContentUnitAnalysisUseCase):
         summarization_service: SummarizationService | None = None,
         importance_service: ImportanceService | None = None,
         relevance_service: RelevanceService | None = None,
+        max_attempts: int = 2,
     ) -> None:
         super().__init__(
             session_factory=session_factory,
@@ -620,6 +631,7 @@ class FeedItemAnalysisUseCase(ContentUnitAnalysisUseCase):
             summarization_service=summarization_service,
             importance_service=importance_service,
             relevance_service=relevance_service,
+            max_attempts=max_attempts,
         )
 
     async def run(self, feed_item_id: int, **kwargs: Any) -> ContentUnitAnalysisOutcome:  # type: ignore[override]
