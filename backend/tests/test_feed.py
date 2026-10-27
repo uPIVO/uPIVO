@@ -100,6 +100,21 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE TABLE user_item_scores ("
+                "  id INTEGER PRIMARY KEY,"
+                "  user_id INTEGER NOT NULL,"
+                "  feed_item_id INTEGER,"
+                "  cluster_id INTEGER,"
+                "  relevance_score REAL,"
+                "  rank_score REAL,"
+                "  reason TEXT,"
+                "  calculated_at DATETIME,"
+                "  analysis_metadata TEXT"
+                ")"
+            )
+        )
 
         # Users
         conn.execute(
@@ -337,3 +352,49 @@ def test_feed_cluster_deduplication_into_single_card(client: TestClient, sqlite_
     assert detail["items_count"] == 2
     assert len(detail["related_items"]) == 2
 
+
+def test_feed_ranking_by_user_scores_and_freshness(client, sqlite_engine):
+    """
+    Items with higher user relevance score and higher importance appear first,
+    even if published slightly earlier than low-relevance items.
+    """
+    now = datetime(2026, 10, 20, 12, 0)
+    with sqlite_engine.begin() as conn:
+        # Reset feed items and insert:
+        # Item 1: High relevance (0.9), High importance (9.0)
+        # Item 2: Low relevance (0.1), Low importance (2.0), slightly newer
+        conn.execute(text("DELETE FROM cluster_items"))
+        conn.execute(text("DELETE FROM user_item_scores"))
+        conn.execute(text("DELETE FROM feed_items"))
+
+        pub_1 = (now).isoformat()
+        pub_2 = (now).isoformat()
+
+        conn.execute(
+            text(
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
+                "original_url, published_at, collected_at, importance_score, processing_status) "
+                "VALUES "
+                "(201, 1, 'ext-201', 'High Rank Item', 'Important body', 'https://habr.com/201', "
+                ":pub1, :pub1, 9.0, 'normalized'), "
+                "(202, 1, 'ext-202', 'Low Rank Item', 'Low body', 'https://habr.com/202', "
+                ":pub2, :pub2, 2.0, 'normalized')"
+            ),
+            {"pub1": pub_1, "pub2": pub_2},
+        )
+
+        # Set user 1 score for 201 to 0.95, and 202 to 0.05
+        conn.execute(
+            text(
+                "INSERT INTO user_item_scores (id, user_id, feed_item_id, relevance_score) "
+                "VALUES (1, 1, 201, 0.95), (2, 1, 202, 0.05)"
+            )
+        )
+
+    res = client.get("/api/feed?user_id=1")
+    assert res.status_code == 200
+    items = res.json()["items"]
+    assert len(items) == 2
+    # Item 201 must be ranked higher than 202
+    assert items[0]["id"] == 201
+    assert items[1]["id"] == 202

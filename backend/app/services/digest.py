@@ -11,6 +11,7 @@ from app.models.digest import Digest, DigestItem
 from app.models.enums import DigestType, ProcessingStatus
 from app.models.feed_item import FeedItem
 from app.models.source import Source
+from app.models.user_item_score import UserItemScore
 from app.models.user_source import UserSource
 from app.schemas.digest import (
     DigestCreateRequest,
@@ -18,6 +19,7 @@ from app.schemas.digest import (
     DigestListItem,
 )
 from app.schemas.feed import FeedItemListItem, SourceBrief
+from app.services.ranking import calculate_card_rank
 from app.services.users import require_user
 
 logger = logging.getLogger(__name__)
@@ -179,8 +181,7 @@ class DigestService:
                 return True
             last_seen_update = previously_included[item.id]
             return bool(
-                item.updated_at
-                and (last_seen_update is None or item.updated_at > last_seen_update)
+                item.updated_at and (last_seen_update is None or item.updated_at > last_seen_update)
             )
 
         story_cards = [
@@ -189,7 +190,61 @@ class DigestService:
             if any(is_new_or_updated(item) for item, _, _ in card["feed_items"])
         ]
 
-        # Ограничиваем топ материалов для одного дайджеста (топ-15 наиболее важных событий)
+        # Load user_item_scores for candidates
+        candidate_feed_ids = [row[0].id for row in candidates]
+        candidate_cluster_ids = [row[2] for row in candidates if row[2] is not None]
+
+        user_scores_by_feed: dict[int, float] = {}
+        user_scores_by_cluster: dict[int, float] = {}
+
+        if candidate_feed_ids or candidate_cluster_ids:
+            score_filters = []
+            if candidate_feed_ids:
+                score_filters.append(UserItemScore.feed_item_id.in_(candidate_feed_ids))
+            if candidate_cluster_ids:
+                score_filters.append(UserItemScore.cluster_id.in_(candidate_cluster_ids))
+
+            scores_query = select(UserItemScore).where(
+                UserItemScore.user_id == request.user_id,
+                or_(*score_filters),
+            )
+            for sc in self.db.execute(scores_query).scalars().all():
+                if sc.feed_item_id and sc.relevance_score is not None:
+                    user_scores_by_feed[sc.feed_item_id] = sc.relevance_score
+                if sc.cluster_id and sc.relevance_score is not None:
+                    user_scores_by_cluster[sc.cluster_id] = sc.relevance_score
+
+        # Rank all eligible story cards
+        for card in story_cards:
+            if card["is_cluster"]:
+                for f_item, _src, is_prim in card["feed_items"]:
+                    if is_prim:
+                        card["primary_item"] = f_item
+                        card["primary_source"] = _src
+                        break
+
+            rank = calculate_card_rank(
+                is_cluster=card["is_cluster"],
+                cluster_id=card["cluster_id"],
+                primary_item=card["primary_item"],
+                feed_items=card["feed_items"],
+                cluster_importance=card.get("importance_score"),
+                user_scores_by_feed=user_scores_by_feed,
+                user_scores_by_cluster=user_scores_by_cluster,
+                now=now,
+            )
+            card["rank_score"] = rank
+
+        # Sort by rank_score DESC, importance_score DESC, published_at DESC, id DESC
+        def _digest_card_sort_key(c: dict) -> tuple:
+            p_item = c["primary_item"]
+            pub = p_item.published_at or p_item.collected_at or datetime.min
+            imp = c.get("importance_score") or getattr(p_item, "importance_score", None) or 0.0
+            return (c["rank_score"], imp, pub, p_item.id)
+
+        story_cards.sort(key=_digest_card_sort_key, reverse=True)
+
+        # Ограничиваем топ материалов для одного дайджеста (топ-15 наиболее подходящих событий)
         story_cards = story_cards[:15]
 
         # Преобразуем отобранные истории в FeedItemListItem
@@ -440,11 +495,7 @@ class DigestService:
                 summary = raw_summary.strip()
 
             score_val = card.get("importance_score") or primary_item.importance_score
-            score_badge = (
-                f" [Важность: {score_val:.1f}]"
-                if score_val is not None
-                else ""
-            )
+            score_badge = f" [Важность: {score_val:.1f}]" if score_val is not None else ""
 
             # Источники
             sources_names = []

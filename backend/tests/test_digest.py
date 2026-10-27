@@ -128,6 +128,21 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE TABLE user_item_scores ("
+                "  id INTEGER PRIMARY KEY,"
+                "  user_id INTEGER NOT NULL,"
+                "  feed_item_id INTEGER,"
+                "  cluster_id INTEGER,"
+                "  relevance_score REAL,"
+                "  rank_score REAL,"
+                "  reason TEXT,"
+                "  calculated_at DATETIME,"
+                "  analysis_metadata TEXT"
+                ")"
+            )
+        )
 
         # 1. Users
         conn.execute(
@@ -502,3 +517,49 @@ def test_digest_cluster_deduplication(client: TestClient, sqlite_engine):
     }
     assert client.get(f"/api/digests/{digest_id}?user_id=3").json() == detail_data
 
+
+def test_digest_ranking_with_user_item_scores(client, sqlite_engine):
+    """
+    Digest ranks candidates according to rank_score computed from
+    user_item_scores, importance, and publication time.
+    """
+    recent = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+    with sqlite_engine.begin() as conn:
+        conn.execute(text("DELETE FROM digest_items"))
+        conn.execute(text("DELETE FROM digests"))
+        conn.execute(text("DELETE FROM cluster_items"))
+        conn.execute(text("DELETE FROM user_item_scores"))
+        conn.execute(text("DELETE FROM feed_items"))
+
+        pub = recent
+        conn.execute(
+            text(
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
+                "original_url, published_at, collected_at, importance_score, processing_status) "
+                "VALUES "
+                "(301, 1, 'ext-301', 'High Relevance Item', 'Body 1', 'https://habr.com/301', "
+                ":pub, :pub, 5.0, 'normalized'), "
+                "(302, 1, 'ext-302', 'Low Relevance Item', 'Body 2', 'https://habr.com/302', "
+                ":pub, :pub, 5.0, 'normalized')"
+            ),
+            {"pub": pub},
+        )
+
+        # User 1 rates item 301 as 0.9 and item 302 as 0.1
+        conn.execute(
+            text(
+                "INSERT INTO user_item_scores (id, user_id, feed_item_id, relevance_score) "
+                "VALUES (1, 1, 301, 0.9), (2, 1, 302, 0.1)"
+            )
+        )
+
+    res = client.post(
+        "/api/digests/generate",
+        json={"user_id": 1, "type": "general", "period_hours": 24},
+    )
+    assert res.status_code == 201
+    digest = res.json()
+    assert digest["items_count"] == 2
+    # 301 must come before 302 in the generated digest
+    assert digest["items"][0]["id"] == 301
+    assert digest["items"][1]["id"] == 302
