@@ -15,6 +15,16 @@ from sqlalchemy.pool import StaticPool
 
 from app.db.session import get_db
 from app.main import app
+from app.services.user_interests import (
+    DuplicateInterestError,
+    read_interest_texts,
+)
+from app.services.user_interests import (
+    create_interest as create_service_interest,
+)
+from app.services.user_interests import (
+    update_interest as update_service_interest,
+)
 
 
 @pytest.fixture
@@ -170,7 +180,7 @@ def test_unknown_user_is_404(api):
         404,
         404,
     ]
-    assert listing.json() == {"detail": "Unknown user"}
+    assert listing.json() == {"detail": "Пользователь не найден."}
 
 
 def test_new_user_has_empty_interest_list(api):
@@ -262,6 +272,71 @@ def test_patch_to_duplicate_is_409(api):
     assert response.status_code == 409
     listing = client.get(f"/api/users/{user_id}/interests").json()
     assert [item["text"] for item in listing] == ["ИИ", "Роботы"]
+
+
+def test_db_only_duplicate_post_is_409_and_keeps_session_usable(api, monkeypatch):
+    """Дубль, который видит только уникальный индекс БД, не должен давать 500."""
+    client, factory, _engine = api
+    user_id = _add_user(factory, "db-duplicate@example.com")
+    monkeypatch.setattr(
+        "app.services.user_interests._reject_duplicate", lambda *_args, **_kwargs: None
+    )
+
+    first = client.post(f"/api/users/{user_id}/interests", json={"text": "OpenAI"})
+    duplicate = client.post(f"/api/users/{user_id}/interests", json={"text": "  openai  "})
+    after = client.post(f"/api/users/{user_id}/interests", json={"text": "Robots"})
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "Такой интерес у пользователя уже существует."}
+    assert after.status_code == 201
+    assert _count(factory, "user_interests") == 2
+
+
+def test_db_only_duplicate_patch_is_409_without_changing_text(api, monkeypatch):
+    client, factory, _engine = api
+    user_id = _add_user(factory, "db-duplicate-patch@example.com")
+    monkeypatch.setattr(
+        "app.services.user_interests._reject_duplicate", lambda *_args, **_kwargs: None
+    )
+    client.post(f"/api/users/{user_id}/interests", json={"text": "AI"})
+    second = client.post(f"/api/users/{user_id}/interests", json={"text": "Robots"}).json()
+
+    duplicate = client.patch(
+        f"/api/users/{user_id}/interests/{second['id']}", json={"text": " ai "}
+    )
+    renamed = client.patch(
+        f"/api/users/{user_id}/interests/{second['id']}", json={"text": "Robotics"}
+    )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "Такой интерес у пользователя уже существует."}
+    assert renamed.status_code == 200
+    listing = client.get(f"/api/users/{user_id}/interests").json()
+    assert [item["text"] for item in listing] == ["AI", "Robotics"]
+
+
+def test_savepoint_keeps_session_usable_after_db_duplicate(api, monkeypatch):
+    """Откат SAVEPOINT не ломает сессию и не оставляет частичных изменений."""
+    _client, factory, _engine = api
+    user_id = _add_user(factory, "savepoint@example.com")
+    monkeypatch.setattr(
+        "app.services.user_interests._reject_duplicate", lambda *_args, **_kwargs: None
+    )
+
+    with factory() as session:
+        create_service_interest(session, user_id, "AI")
+        with pytest.raises(DuplicateInterestError):
+            create_service_interest(session, user_id, "  ai  ")
+        assert read_interest_texts(session, user_id) == ["AI"]
+
+        second = create_service_interest(session, user_id, "Robots")
+        with pytest.raises(DuplicateInterestError):
+            update_service_interest(session, user_id, second.id, " ai ")
+        assert read_interest_texts(session, user_id) == ["AI", "Robots"]
+
+        renamed = update_service_interest(session, user_id, second.id, "Robotics")
+        assert renamed.text == "Robotics"
 
 
 def test_foreign_interest_is_not_accessible(api):

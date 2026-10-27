@@ -13,11 +13,26 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.ai.analysis_metadata import interests_input_fingerprint
+from app.ai.analysis_metadata import (
+    FeedItemAIMetadata,
+    StoredSummaryResult,
+    SummaryResultHistory,
+    content_input_fingerprint,
+    interests_input_fingerprint,
+)
 from app.ai.base import LLMError
 from app.ai.dto import RelevanceResult, SummaryResult
-from app.ai.repository import SaveDisposition
+from app.ai.repository import SaveDisposition, content_unit_from_feed_item
+from app.models.enums import SourceType
+from app.models.feed_item import FeedItem
+from app.models.source import Source
+from app.models.user import User
+from app.models.user_interest import UserInterest
+from app.models.user_source import UserSource
 from app.services.user_relevance import (
     ContentUnitRef,
     UnviewedCandidateSelector,
@@ -351,23 +366,45 @@ def test_stale_interests_are_reread_and_old_answer_is_not_saved_as_current() -> 
 
     assert outcome.status is UserRelevanceStatus.CURRENT
     assert outcome.attempts == 2
-    assert repository.stale_saves == 2
-    assert scoring.inputs[-1]["value"]["interests"] == ["ИИ", "Роботы"]
+    # Внутренний повтор use case отключён в DB-пути: гонка A→B стоит ровно два
+    # AI-вызова (A и B), а не A, A, B.
+    assert repository.stale_saves == 1
+    assert scoring.provider_calls == 2
+    assert [entry["value"]["interests"] for entry in scoring.inputs] == [
+        ["ИИ"],
+        ["ИИ", "Роботы"],
+    ]
     assert [entry["interests_fingerprint"] for entry in repository.saved] == [
         interests_input_fingerprint(["ИИ", "Роботы"])
     ]
 
 
+def test_interests_removed_during_ai_call_skip_without_extra_provider_call() -> None:
+    catalog = _Catalog(interests_sequence=[["ИИ"], ["ИИ"], []])
+    scoring = _ScoringService()
+    repository = _Repository(always_stale=True)
+    service = _service(catalog=catalog, repository=repository, scoring=scoring)
+
+    outcome = asyncio.run(service.score_user_content_unit(7, "feed_item", 11))
+
+    assert outcome.status is UserRelevanceStatus.SKIPPED
+    assert scoring.provider_calls == 1
+    assert repository.stale_saves == 1
+    assert repository.saved == []
+
+
 def test_stale_interests_that_keep_changing_do_not_produce_current_result() -> None:
     catalog = _Catalog(interests=["ИИ"])
     repository = _Repository(always_stale=True)
-    service = _service(catalog=catalog, repository=repository)
+    scoring = _ScoringService()
+    service = _service(catalog=catalog, repository=repository, scoring=scoring)
 
     outcome = asyncio.run(service.score_user_content_unit(7, "feed_item", 11))
 
     assert outcome.status is UserRelevanceStatus.FAILED
     assert outcome.attempts == 2
     assert outcome.error
+    assert scoring.provider_calls == 2
     assert repository.saved == []
 
 
@@ -704,3 +741,139 @@ def test_background_task_runs_service_and_returns_json_safe_result(
         "reused": False,
         "error": None,
     }
+
+
+class _RecordingSendTask:
+    """Заменяет брокер: запоминает поставленные фоновые задачи."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+
+    def send_task(self, name: str, kwargs: dict[str, Any] | None = None) -> None:
+        self.sent.append((name, dict(kwargs or {})))
+
+
+_RELEVANCE_TABLES = (
+    "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, "
+    "password_hash TEXT NOT NULL, created_at DATETIME, updated_at DATETIME)",
+    "CREATE TABLE user_interests (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "user_id INTEGER NOT NULL, text TEXT NOT NULL, "
+    "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME)",
+    "CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, "
+    "name TEXT NOT NULL, canonical_url TEXT NOT NULL, external_id TEXT, "
+    "last_synced_at DATETIME, created_at DATETIME)",
+    "CREATE TABLE user_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "user_id INTEGER NOT NULL, source_id INTEGER NOT NULL, enabled BOOLEAN NOT NULL, "
+    "created_at DATETIME, UNIQUE (user_id, source_id))",
+    "CREATE TABLE feed_items (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "source_id INTEGER NOT NULL, external_id TEXT NOT NULL, title TEXT, "
+    "body_text TEXT NOT NULL, original_url TEXT NOT NULL, author TEXT, "
+    "published_at DATETIME, collected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+    "raw_payload TEXT, extracted_entities TEXT, content_hash TEXT, summary TEXT, "
+    "importance_score REAL, ai_metadata TEXT, "
+    "processing_status TEXT NOT NULL DEFAULT 'pending', "
+    "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME)",
+    "CREATE TABLE content_clusters (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, "
+    "summary TEXT, importance_score REAL, ai_metadata TEXT, created_at DATETIME)",
+    "CREATE TABLE cluster_items (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "cluster_id INTEGER NOT NULL, feed_item_id INTEGER NOT NULL, "
+    "is_primary BOOLEAN NOT NULL, UNIQUE (cluster_id, feed_item_id))",
+    "CREATE TABLE user_item_scores (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "user_id INTEGER NOT NULL, feed_item_id INTEGER, cluster_id INTEGER, "
+    "relevance_score REAL, rank_score REAL, reason TEXT, "
+    "calculated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, analysis_metadata TEXT)",
+)
+
+
+@pytest.fixture
+def relevance_db(monkeypatch: pytest.MonkeyPatch):
+    """SQLite-БД для сквозной проверки хуков и фоновых задач без брокера."""
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    with engine.begin() as connection:
+        for statement in _RELEVANCE_TABLES:
+            connection.execute(text(statement))
+    monkeypatch.setattr("app.services.user_relevance.get_engine", lambda: engine)
+    yield sessionmaker(bind=engine)
+    engine.dispose()
+
+
+def _seed_units_with_summaries(factory) -> tuple[int, int, int, int]:
+    """Пользователь с интересом и источником, две публикации с актуальной выжимкой."""
+    with factory() as session:
+        user = User(email="hook@example.test", password_hash="test-only")
+        source = Source(
+            type=SourceType.TELEGRAM,
+            name="Источник",
+            external_id="hook-source",
+            canonical_url="https://example.test/hook-source",
+        )
+        session.add_all([user, source])
+        session.flush()
+        session.add(UserSource(user_id=user.id, source_id=source.id, enabled=True))
+        session.add(UserInterest(user_id=user.id, text="ИИ"))
+        items = [
+            FeedItem(
+                source_id=source.id,
+                external_id=f"hook-item-{index}",
+                title=f"Новость {index}",
+                body_text=f"Факты {index}",
+                original_url=f"https://example.test/hook-item-{index}",
+            )
+            for index in range(2)
+        ]
+        session.add_all(items)
+        session.flush()
+        for item in items:
+            result = _summary(f"Выжимка {item.id}")
+            unit = content_unit_from_feed_item(item, source.name)
+            item.summary = result.summary
+            item.ai_metadata = FeedItemAIMetadata(
+                summary=SummaryResultHistory(
+                    last_good=StoredSummaryResult(
+                        status="current",
+                        input_fingerprint=content_input_fingerprint(unit),
+                        result=result,
+                    )
+                )
+            ).model_dump(mode="json", exclude_none=True)
+        ids = (user.id, source.id, items[0].id, items[1].id)
+        session.commit()
+        return ids
+
+
+def test_hooks_and_background_tasks_share_one_viewed_provider_resolver(
+    relevance_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = relevance_db
+    user_id, source_id, viewed_item_id, unviewed_item_id = _seed_units_with_summaries(factory)
+    recorder = _RecordingSendTask()
+    monkeypatch.setattr("app.workers.scheduler.celery_app", recorder)
+    provider = _Provider({("feed_item", viewed_item_id): True})
+    monkeypatch.setattr(
+        "app.services.viewed_status.get_viewed_status_provider", lambda: provider
+    )
+
+    assert notify_interests_changed(user_id) is True
+    assert notify_source_activated(user_id, source_id) is True
+    assert recorder.sent == [
+        ("relevance.recalculate_user", {"user_id": user_id}),
+        ("relevance.recalculate_user_source", {"user_id": user_id, "source_id": source_id}),
+    ]
+
+    from app.workers import tasks
+
+    by_user = tasks.recalculate_user_task(user_id)
+    by_source = tasks.recalculate_user_source_task(user_id, source_id)
+
+    expected = [{"kind": "feed_item", "unit_id": unviewed_item_id}]
+    assert by_user == expected
+    assert by_source == expected
+    scored = [
+        kwargs["unit_id"]
+        for name, kwargs in recorder.sent
+        if name == "relevance.score_user_content_unit"
+    ]
+    assert scored == [unviewed_item_id, unviewed_item_id]
+    assert viewed_item_id not in scored

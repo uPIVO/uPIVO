@@ -64,7 +64,11 @@ def list_interests(session: Session, user_id: int) -> list[InterestResponse]:
 
 
 def create_interest(session: Session, user_id: int, text: str) -> InterestResponse:
-    """Добавляет интерес. Изменение списка инвалидирует текущие оценки."""
+    """Добавляет интерес. Изменение списка инвалидирует текущие оценки.
+
+    Вставка выполняется внутри SAVEPOINT: конфликт уникального индекса БД
+    откатывает только её, а сессия остаётся рабочей и превращается в 409.
+    """
     require_user(session, user_id)
     cleaned = normalize_interest_text(text)
     _lock_user(session, user_id)
@@ -75,7 +79,8 @@ def create_interest(session: Session, user_id: int, text: str) -> InterestRespon
             session.add(interest)
             session.flush()
     except IntegrityError:
-        session.expunge(interest)
+        # После отката SAVEPOINT добавленный объект снова transient, поэтому
+        # expunge недопустим: он дал бы InvalidRequestError вместо 409.
         raise DuplicateInterestError(cleaned) from None
     _invalidate_scores(session, user_id)
     _commit(session)
@@ -89,7 +94,9 @@ def update_interest(
     """Заменяет текст интереса своего пользователя.
 
     PATCH с тем же нормализованным текстом ничего не меняет: ни `updated_at`,
-    ни персональные оценки, ни фоновый пересчёт не затрагиваются.
+    ни персональные оценки, ни фоновый пересчёт не затрагиваются. Новый текст
+    меняется внутри SAVEPOINT: безусловный preflush иначе записал бы его до
+    точки сохранения, и конфликт уникального индекса нельзя было бы откатить.
     """
     require_user(session, user_id)
     cleaned = normalize_interest_text(text)
@@ -98,10 +105,10 @@ def update_interest(
     if interest.text == cleaned:
         return _response(interest)
     _reject_duplicate(session, user_id, cleaned, exclude_id=interest_id)
-    interest.text = cleaned
-    interest.updated_at = _now()
     try:
         with session.begin_nested():
+            interest.text = cleaned
+            interest.updated_at = _now()
             session.flush()
     except IntegrityError:
         raise DuplicateInterestError(cleaned) from None

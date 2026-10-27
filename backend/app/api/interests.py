@@ -30,11 +30,13 @@ router = APIRouter(prefix="/users/{user_id}/interests", tags=["interests"])
 
 def _raise_http(exc: Exception) -> None:
     if isinstance(exc, UnknownUserError):
-        raise HTTPException(status_code=404, detail="Unknown user") from exc
+        raise HTTPException(status_code=404, detail="Пользователь не найден.") from exc
     if isinstance(exc, UnknownInterestError):
-        raise HTTPException(status_code=404, detail="Unknown interest") from exc
+        raise HTTPException(status_code=404, detail="Интерес пользователя не найден.") from exc
     if isinstance(exc, DuplicateInterestError):
-        raise HTTPException(status_code=409, detail="Interest already exists") from exc
+        raise HTTPException(
+            status_code=409, detail="Такой интерес у пользователя уже существует."
+        ) from exc
     if isinstance(exc, InvalidInterestError):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     raise exc

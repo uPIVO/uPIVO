@@ -216,14 +216,16 @@ def test_migration_enforces_uniqueness_not_blank_and_cascade(engine):
 def test_duplicate_interest_is_reported_by_service(engine):
     with Session(engine) as session, session.begin():
         seeded = _seed(session)
+        # id читается внутри транзакции: после commit объект был бы detached.
+        user_id = seeded.user.id
 
     with Session(engine) as session:
-        create_interest(session, seeded.user.id, "  Новые модели OpenAI ")
-        assert read_interest_texts(session, seeded.user.id) == ["Новые модели OpenAI"]
+        create_interest(session, user_id, "  Новые модели OpenAI ")
+        assert read_interest_texts(session, user_id) == ["Новые модели OpenAI"]
 
     with pytest.raises(DuplicateInterestError):
         with Session(engine) as session:
-            create_interest(session, seeded.user.id, "новые модели openai")
+            create_interest(session, user_id, "новые модели openai")
 
 
 def test_interest_change_invalidates_current_score_but_keeps_history(engine):
@@ -375,8 +377,9 @@ def test_interests_changed_during_ai_call_do_not_commit_stale_answer(engine):
     outcome = asyncio.run(service.score_user_content_unit(user_id, "feed_item", item_id))
 
     assert outcome.status is UserRelevanceStatus.CURRENT
+    # Внутренний повтор use case отключён в DB-пути: гонка стоит два AI-вызова.
+    assert scoring.provider_calls == 2
     assert [entry["interests"] for entry in scoring.inputs] == [
-        ["ИИ"],
         ["ИИ"],
         ["ИИ", "Электромобили"],
     ]

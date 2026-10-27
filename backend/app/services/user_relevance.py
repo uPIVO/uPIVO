@@ -35,6 +35,7 @@ from app.ai.repository import FeedItemInClusterError
 from app.ai.service import RelevanceService
 from app.core.config import get_settings
 from app.db.session import get_engine
+from app.services import viewed_status
 from app.services.analyze_feed_item import (
     AnalysisOperation,
     AnalysisRequestError,
@@ -298,6 +299,9 @@ class UserRelevanceService:
                 kind=ref.kind,
                 repository=self._repository,
                 relevance_service=self._relevance_service_factory(),
+                # Внутренний повтор здесь только тратил бы AI-вызов на заведомо
+                # старый список: актуальные интересы перечитывает внешний цикл.
+                max_attempts=1,
             )
         except LLMError as error:
             return self._outcome(
@@ -432,11 +436,19 @@ def build_default_service(
 ) -> UserRelevanceService:
     """Собрать сервис на реальных зависимостях приложения.
 
-    Провайдер статуса просмотра по умолчанию отсутствует: массового
-    ретроспективного пересчёта нет. AI-адаптер создаётся лениво, поэтому
-    хуки изменения интересов не требуют ключей провайдера.
+    Провайдер статуса просмотра берётся из единой точки подключения
+    `get_viewed_status_provider()`, если явный аргумент не передан. По умолчанию
+    функции подключения возвращается `None`: массового ретроспективного
+    пересчёта нет. AI-адаптер создаётся лениво, поэтому хуки изменения интересов
+    не требуют ключей провайдера.
     """
     from app.workers.scheduler import CeleryTaskScheduler
+
+    provider = (
+        viewed_status_provider
+        if viewed_status_provider is not None
+        else viewed_status.get_viewed_status_provider()
+    )
 
     def session_factory() -> Session:
         return Session(get_engine())
@@ -444,7 +456,7 @@ def build_default_service(
     repository = InterestGuardedRepository()
     catalog = UserRelevanceCatalog(session_factory=session_factory)
     selector: UnviewedCandidateSelector | None = None
-    if viewed_status_provider is not None:
+    if provider is not None:
 
         def has_current_summary(ref: ContentUnitRef) -> bool:
             try:
@@ -457,7 +469,7 @@ def build_default_service(
             return snapshot is not None and snapshot.summary_result is not None
 
         selector = UnviewedCandidateSelector(
-            viewed_status_provider=viewed_status_provider,
+            viewed_status_provider=provider,
             has_current_summary=has_current_summary,
         )
 
@@ -467,7 +479,7 @@ def build_default_service(
         repository=repository,
         catalog=catalog,
         scheduler=scheduler if scheduler is not None else CeleryTaskScheduler(),
-        viewed_status_provider=viewed_status_provider,
+        viewed_status_provider=provider,
         selector=selector,
         lock=PostgresAdvisoryLock(),
     )
