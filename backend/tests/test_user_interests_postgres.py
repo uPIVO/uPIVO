@@ -195,9 +195,15 @@ def _service(engine, scoring: _Scoring) -> UserRelevanceService:
 
 
 def test_migration_enforces_uniqueness_not_blank_and_cascade(engine):
+    # Проверяются только ограничения user_interests: никаких источников и публикаций,
+    # чтобы каскад не зависел от посторонних FK пользователя.
     with Session(engine) as session, session.begin():
-        seeded = _seed(session, interests=["OpenAI"])
-        user_id = seeded.user.id
+        user = User(email=f"{uuid4().hex}@example.test", password_hash="test-only")
+        session.add(user)
+        session.flush()
+        user_id = user.id
+        session.add(UserInterest(user_id=user_id, text="OpenAI"))
+        session.flush()
 
     with pytest.raises(IntegrityError):
         with Session(engine) as session, session.begin():
