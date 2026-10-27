@@ -25,6 +25,11 @@ class DigestType(StrEnum):
     TOPIC = "topic"
 
 
+class FavoriteTargetType(StrEnum):
+    FEED_ITEM = "feed_item"
+    CLUSTER = "cluster"
+
+
 def pg_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
     return SAEnum(
         enum_cls,
@@ -38,3 +43,4 @@ def pg_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
 source_type_enum = pg_enum(SourceType, "source_type")
 processing_status_enum = pg_enum(ProcessingStatus, "processing_status")
 digest_type_enum = pg_enum(DigestType, "digest_type")
+favorite_target_type_enum = pg_enum(FavoriteTargetType, "favorite_target_type")

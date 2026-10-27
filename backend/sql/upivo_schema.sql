@@ -358,4 +358,37 @@ CREATE TABLE notification_schedules (
 CREATE INDEX idx_notification_schedules_user_id
     ON notification_schedules(user_id);
 
+-- =========================
+-- FAVORITES
+-- =========================
+
+CREATE TABLE favorites (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_type VARCHAR(16) NOT NULL DEFAULT 'feed_item',
+    feed_item_id BIGINT REFERENCES feed_items(id) ON DELETE CASCADE,
+    cluster_id BIGINT REFERENCES content_clusters(id) ON DELETE CASCADE,
+    note TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_favorites_target_reference
+        CHECK (
+            (target_type = 'feed_item' AND feed_item_id IS NOT NULL AND cluster_id IS NULL) OR
+            (target_type = 'cluster' AND cluster_id IS NOT NULL AND feed_item_id IS NULL)
+        ),
+    CONSTRAINT uq_favorites_user_feed_item
+        UNIQUE (user_id, target_type, feed_item_id),
+    CONSTRAINT uq_favorites_user_cluster
+        UNIQUE (user_id, target_type, cluster_id)
+);
+
+CREATE INDEX idx_favorites_user_id_created_at
+    ON favorites(user_id, created_at DESC, id DESC);
+
+CREATE INDEX idx_favorites_feed_item_id
+    ON favorites(feed_item_id);
+
+CREATE INDEX idx_favorites_cluster_id
+    ON favorites(cluster_id);
+
 COMMIT;
