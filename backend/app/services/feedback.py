@@ -21,7 +21,7 @@ from app.models.feed_item import FeedItem
 from app.models.feedback import Feedback
 from app.models.user import User
 from app.schemas.feedback import FeedbackKind, FeedbackResponse
-from app.services.users import require_user
+from app.services.users import UnknownUserError, require_user
 from app.services.visibility import cluster_visible, standalone_feed_item_visible
 
 
@@ -50,27 +50,34 @@ def set_feedback(
 
     Блокировка строки пользователя берётся до чтения реакции, поэтому проверка
     доступности, чтение и запись остаются в одной транзакции. Совпадающая
-    реакция не меняет `updated_at` и ничего не пишет.
+    реакция не меняет `updated_at` и ничего не пишет. Ответ собирается из
+    загруженных полей до `commit`: после фиксации строку может удалить или
+    заменить параллельный запрос, и ORM-объект уже не принадлежит транзакции.
     """
-    require_user(session, user_id)
-    _lock_user(session, user_id)
-    _require_visible_target(session, user_id, kind, unit_id)
-    existing = _find(session, user_id, kind, unit_id)
-    if existing is None:
-        feedback = Feedback(
-            user_id=user_id,
-            reaction=reaction,
-            created_at=_now(),
-            **_target(kind, unit_id),
-        )
-        session.add(feedback)
-        _commit(session)
-        return _response(feedback), True
-    if existing.reaction != reaction:
-        existing.reaction = reaction
-        existing.updated_at = _now()
-    _commit(session)
-    return _response(existing), False
+    try:
+        _lock_user(session, user_id)
+        _require_visible_target(session, user_id, kind, unit_id)
+        existing = _find(session, user_id, kind, unit_id)
+        if existing is None:
+            feedback = Feedback(
+                user_id=user_id,
+                reaction=reaction,
+                created_at=_now(),
+                **_target(kind, unit_id),
+            )
+            session.add(feedback)
+            session.flush()
+            response, created = _response(feedback), True
+        else:
+            if existing.reaction != reaction:
+                existing.reaction = reaction
+                existing.updated_at = _now()
+            response, created = _response(existing), False
+        session.commit()
+        return response, created
+    except Exception:
+        session.rollback()
+        raise
 
 
 def get_feedback(
@@ -87,14 +94,18 @@ def get_feedback(
 def delete_feedback(session: Session, user_id: int, kind: FeedbackKind, unit_id: int) -> None:
     """Физически удаляет реакцию; повторное удаление — штатное состояние.
 
-    Отключение источника не мешает удалить собственную прежнюю реакцию.
+    Доступность единицы не проверяется: отключение источника не мешает удалить
+    собственную прежнюю реакцию. Блокировка строки пользователя общая с `PUT`.
     """
-    require_user(session, user_id)
-    _lock_user(session, user_id)
-    feedback = _find(session, user_id, kind, unit_id)
-    if feedback is not None:
-        session.delete(feedback)
-    _commit(session)
+    try:
+        _lock_user(session, user_id)
+        feedback = _find(session, user_id, kind, unit_id)
+        if feedback is not None:
+            session.delete(feedback)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
 
 
 def list_feedback(
@@ -222,17 +233,14 @@ def _response(feedback: Feedback) -> FeedbackResponse:
 
 
 def _lock_user(session: Session, user_id: int) -> None:
-    """Сериализует изменения реакций этого пользователя."""
-    session.execute(select(User.id).where(User.id == user_id).with_for_update())
+    """Сериализует все записи обратной связи этого пользователя.
+
+    Существование строки проверяется тем же `SELECT ... FOR UPDATE`: отдельный
+    `require_user` оставлял бы окно между проверкой и блокировкой.
+    """
+    if session.scalar(select(User.id).where(User.id == user_id).with_for_update()) is None:
+        raise UnknownUserError(user_id)
 
 
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
-
-
-def _commit(session: Session) -> None:
-    try:
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise

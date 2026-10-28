@@ -9,20 +9,24 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.db.session import get_db
 from app.main import app
+from app.models.enums import FeedbackType
+from app.schemas.feedback import FeedbackKind
+from app.services.feedback import set_feedback
 
 
 @pytest.fixture
-def api():
+def api(tmp_path):
+    # Файловая БД даёт отдельные соединения: как в PostgreSQL, ответ не зависит
+    # от чужих изменений той же строки сразу после commit.
     engine = create_engine(
-        "sqlite://",
+        f"sqlite:///{tmp_path / 'feedback.db'}",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
     )
     with engine.begin() as connection:
         connection.execute(
@@ -450,8 +454,7 @@ def test_missing_reaction_returns_404(api):
     assert response.json()["detail"] == "Реакция не найдена."
 
 
-def test_openapi_contains_all_feedback_operations(api):
-    client, _, _ = api
+def test_openapi_contains_all_feedback_operations():
     paths = app.openapi()["paths"]
     collection = paths["/api/users/{user_id}/feedback"]
     assert set(collection) == {"get"}
@@ -464,3 +467,85 @@ def test_openapi_contains_all_feedback_operations(api):
         "limit",
         "offset",
     }
+
+
+def _session_override(factory, engine=None, user_id: int = 1):
+    """Override `get_db`; с engine удаляет реакции пользователя сразу после commit.
+
+    Это ручная синхронизация с параллельным `DELETE`/`PUT` после фиксации, а не
+    гонка потоков: порядок событий детерминирован.
+    """
+
+    def remove_after_commit(_session) -> None:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM feedback WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+
+    def override_db():
+        session = factory()
+        if engine is not None:
+            event.listen(session, "after_commit", remove_after_commit)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    return override_db
+
+
+@pytest.mark.parametrize("scenario", ["create", "change", "noop"])
+def test_put_returns_own_snapshot_when_row_is_deleted_after_commit(api, scenario):
+    """Ответ PUT не зависит от того, что строка исчезла сразу после commit."""
+    client, factory, engine = api
+    reaction = "not_interested" if scenario == "change" else "useful"
+    before = None
+    if scenario != "create":
+        assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+        before = client.get("/api/users/1/feedback/feed_item/101").json()
+
+    app.dependency_overrides[get_db] = _session_override(factory, engine)
+    try:
+        response = _put(client, 1, "feed_item", 101, reaction)
+    finally:
+        app.dependency_overrides[get_db] = _session_override(factory)
+
+    assert response.status_code == (200 if scenario != "create" else 201)
+    body = response.json()
+    assert (body["kind"], body["unit_id"], body["reaction"]) == ("feed_item", 101, reaction)
+    if scenario == "create":
+        assert body["updated_at"] is None
+    elif scenario == "change":
+        assert (body["id"], body["created_at"]) == (before["id"], before["created_at"])
+        assert body["updated_at"] is not None
+    else:
+        assert (body["id"], body["created_at"]) == (before["id"], before["created_at"])
+        assert body["updated_at"] is None
+    # Строка удалена параллельным запросом сразу после фиксации.
+    assert _count(factory, "feedback") == 0
+
+
+def test_flush_error_rolls_back_and_releases_transaction(api):
+    """Ошибка flush/commit откатывает транзакцию вместе с блокировкой строки."""
+    client, factory, engine = api
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TRIGGER feedback_insert_guard BEFORE INSERT ON feedback "
+                "BEGIN SELECT RAISE(ABORT, 'boom'); END"
+            )
+        )
+    session = factory()
+    try:
+        with pytest.raises(IntegrityError):
+            set_feedback(session, 1, FeedbackKind.FEED_ITEM, 101, FeedbackType.USEFUL)
+        # Транзакция и блокировка строки пользователя освобождены.
+        assert not session.in_transaction()
+    finally:
+        session.close()
+    assert _count(factory, "feedback") == 0
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER feedback_insert_guard"))
+    assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
