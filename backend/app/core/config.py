@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     typesafe_model: str = "jev-1.14.0"
     typesafe_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     log_level: str = "INFO"
+    auth_token_secret: SecretStr = SecretStr("dev-only-change-me")
+    auth_token_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0)
 
 
 @lru_cache

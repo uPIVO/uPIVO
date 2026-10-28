@@ -96,10 +96,13 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 
 ## Границы кода
 
-- `api`: HTTP-маршруты здоровья, Habr, источников и тем
+- `api`: HTTP-маршруты здоровья, регистрации и входа
+  (`/api/auth/register`, `/api/auth/login`), Habr, источников и тем
   (`/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`), ленты
   (`/api/feed`) и дайджестов (`/api/digests`).
-  Авторизации нет: в пути передаётся `users.id`.
+  Регистрация, вход и `/health` публичные. Источники и темы требуют Bearer-токен
+  того же `users.id`: нет или неверный токен — 401, чужой токен — 403.
+  Лента и дайджесты по-прежнему принимают `user_id` без токена.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
 - `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
@@ -123,7 +126,7 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
   склейка. Summary не вызывается.
 - `ai`: provider-neutral интерфейс и ручные сценарии анализа FeedItem.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
-- `auth`: зарезервировано; схема авторизации не выбрана.
+- `auth`: scrypt-хеш пароля и подписанный HMAC-токен входа. Не JWT, не Firebase и не OAuth.
 
 API не подключается к БД при импорте/старте. `/health` проверяет процесс,
 `/health/db` проверяет БД и возвращает 503 без деталей ошибок при недоступности.
@@ -131,7 +134,10 @@ Compose запускает миграции отдельно перед API; п�
 Session закрывается dependency; сценарии сбора выполняют commit/rollback своих записей.
 Нет автоматического commit после HTTP-запроса.
 
-Не вводим Firebase/OAuth/JWT до решения команды. Frontend Next.js + TypeScript
-начнётся в следующем модуле. Production hosting и auth остаются решениями техлида.
+Вход — email и пароль; токен подписан HMAC (`AUTH_TOKEN_SECRET`). Firebase, OAuth и JWT
+не используются. Токен обязателен только для `/api/users/{user_id}/sources` и
+`/api/users/{user_id}/topics`.
+Frontend Next.js + TypeScript начнётся в следующем модуле. Production hosting
+остаётся решением техлида.
 AI-провайдеры ручного сценария настраиваются через env;
 существующая инфраструктура предназначена для разработки.

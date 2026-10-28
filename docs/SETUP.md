@@ -101,6 +101,9 @@ DATABASE_URL для локального запуска. Спецсимволы 
 простые dev-примеры не предназначены для production.
 
 APP_HOST/APP_PORT используются `uv run python -m app.main` и Docker.
+AUTH_TOKEN_SECRET подписывает токен входа. В development есть значение по
+умолчанию `dev-only-change-me`; вне локальной разработки задайте свой секрет.
+Срок токена — `AUTH_TOKEN_TTL_SECONDS` (по умолчанию 7 суток).
 Прямой вызов uvicorn использует свои флаги: `--host 0.0.0.0 --port 8000`.
 При смене POSTGRES_PORT измените локальный DATABASE_URL на тот же порт.
 При смене REDIS_PORT измените локальный REDIS_URL; внутри Compose порт всегда 6379.

@@ -1,4 +1,4 @@
-"""Load a users row. Login is not implemented."""
+"""Load a users row by id. Login lives in app.services.auth."""
 
 from sqlalchemy.orm import Session
 

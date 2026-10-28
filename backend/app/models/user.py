@@ -7,7 +7,7 @@ from app.db.base import Base
 
 
 class User(Base):
-    """Account row. Auth is not implemented; password_hash exists to match the kernel schema."""
+    """Account row. password_hash is a scrypt hash; the password itself is not stored."""
 
     __tablename__ = "users"
 

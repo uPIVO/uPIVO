@@ -1,6 +1,6 @@
 """Request and response models for per-user sources and topics.
 
-Authentication is not part of this API. Callers pass an existing users.id.
+Callers pass an existing users.id. The HTTP routes require that user's bearer token.
 """
 
 from datetime import datetime
