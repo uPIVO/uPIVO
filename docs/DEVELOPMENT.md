@@ -250,7 +250,10 @@ email, без учёта регистра — HTTP 409 `{"detail":"Email already
 (`token`, `token_type: bearer`, `user_id`, `email`). Неизвестный email — 401
 `{"detail":"Unknown user"}`. Неверный пароль — 401 `{"detail":"Wrong password"}`.
 Токен подписывается `AUTH_TOKEN_SECRET`; в development есть значение по умолчанию.
-Маршруты источников, тем, ленты и дайджестов токен не требуют.
+Его нужно передавать на `/api/users/{user_id}/sources` и `/api/users/{user_id}/topics`
+как `Authorization: Bearer <token>`, и `user_id` в пути должен совпасть с токеном.
+Без токена или с плохим токеном — 401 `{"detail":"Not authenticated"}`. Чужой токен —
+403 `{"detail":"Forbidden"}`. Регистрация, вход, `/health`, лента и дайджесты токен не требуют.
 
 Из `backend/`, API уже запущен (`uv run uvicorn app.main:app --reload`):
 
@@ -266,8 +269,9 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/login \
 ## Темы и источники
 
 HTTP API управляет связями `user_sources` и тематическими папками `folders` /
-`feed_item_folders`. Эти маршруты не требуют токен: в пути передаётся уже
-существующий `users.id`. Учётную запись создаёт `POST /api/auth/register`.
+`feed_item_folders`. В пути передаётся существующий `users.id`, а заголовок
+`Authorization: Bearer` должен нести токен этого же пользователя из
+`POST /api/auth/login`.
 
 Источник общий: повторное подключение того же канала не создаёт вторую строку
 `sources`, а только связь пользователя. Выключение меняет `user_sources.enabled`.
@@ -292,6 +296,7 @@ VALUES ('demo@example.com', 'local-dev-not-auth');
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/api/users/1/sources" \
   -H "content-type: application/json" \
+  -H "Authorization: Bearer <token from POST /api/auth/login>" \
   -d '{"type":"youtube","url":"https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw","name":"Google for Developers"}'
 ```
 

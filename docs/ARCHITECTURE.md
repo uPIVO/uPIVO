@@ -100,8 +100,9 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
   (`/api/auth/register`, `/api/auth/login`), Habr, источников и тем
   (`/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`), ленты
   (`/api/feed`) и дайджестов (`/api/digests`).
-  Регистрация и вход проверяют email и пароль. Остальные пользовательские
-  маршруты по-прежнему принимают `users.id` в пути и не требуют токен.
+  Регистрация, вход и `/health` публичные. Источники и темы требуют Bearer-токен
+  того же `users.id`: нет или неверный токен — 401, чужой токен — 403.
+  Лента и дайджесты по-прежнему принимают `user_id` без токена.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
 - `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
@@ -134,7 +135,8 @@ Session закрывается dependency; сценарии сбора выпо�
 Нет автоматического commit после HTTP-запроса.
 
 Вход — email и пароль; токен подписан HMAC (`AUTH_TOKEN_SECRET`). Firebase, OAuth и JWT
-не используются. Существующие пользовательские API этим входом не закрываются.
+не используются. Токен обязателен только для `/api/users/{user_id}/sources` и
+`/api/users/{user_id}/topics`.
 Frontend Next.js + TypeScript начнётся в следующем модуле. Production hosting
 остаётся решением техлида.
 AI-провайдеры ручного сценария настраиваются через env;

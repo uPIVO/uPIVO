@@ -1,7 +1,7 @@
 """Per-user sources and topics.
 
-Authentication is not part of this API. The path user_id is users.id and must
-already exist. This module does not add JWT, Firebase, or OAuth.
+The path user_id is users.id and must already exist. Each route requires a
+Bearer token issued for that same user. This module does not add Firebase or OAuth.
 """
 
 from typing import Annotated
@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from sqlalchemy.orm import Session
 
+from app.api.security import require_same_user
 from app.db.session import get_db
 from app.schemas.catalog import (
     SourceAttachRequest,
@@ -40,10 +41,18 @@ from app.services.user_sources import (
 )
 from app.services.users import UnknownUserError
 
-_AUTH = "Авторизация в этот API не входит: user_id — это существующий users.id."
+_AUTH = "Нужен Bearer-токен этого user_id. Чужой токен — 403."
 
-sources_router = APIRouter(prefix="/users/{user_id}/sources", tags=["sources"])
-topics_router = APIRouter(prefix="/users/{user_id}/topics", tags=["topics"])
+sources_router = APIRouter(
+    prefix="/users/{user_id}/sources",
+    tags=["sources"],
+    dependencies=[Depends(require_same_user)],
+)
+topics_router = APIRouter(
+    prefix="/users/{user_id}/topics",
+    tags=["topics"],
+    dependencies=[Depends(require_same_user)],
+)
 
 
 def _raise_http(exc: Exception) -> None:

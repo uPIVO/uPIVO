@@ -1,4 +1,4 @@
 """Email/password hashing and the signed login token.
 
-Existing user APIs are not gated by this package.
+/users/{user_id} HTTP routes check this token. Register and login do not.
 """

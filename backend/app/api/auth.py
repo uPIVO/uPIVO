@@ -1,7 +1,4 @@
-"""Register and log in with email and password.
-
-This router does not require a token on other user routes.
-"""
+"""Register and log in with email and password. These routes stay public."""
 
 from typing import Annotated
 
