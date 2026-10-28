@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api.digest import router as digest_router
 from app.api.feed import router as feed_router
+from app.api.feedback import router as feedback_router
 from app.api.habr import router as habr_router
 from app.api.health import router as health_router
 from app.api.interests import router as interests_router
@@ -33,6 +34,7 @@ app.include_router(habr_router, prefix="/api")
 app.include_router(sources_router, prefix="/api")
 app.include_router(topics_router, prefix="/api")
 app.include_router(interests_router, prefix="/api")
+app.include_router(feedback_router, prefix="/api")
 app.include_router(feed_router, prefix="/api")
 app.include_router(digest_router, prefix="/api")
 

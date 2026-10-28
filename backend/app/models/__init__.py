@@ -2,9 +2,10 @@
 
 from app.models.content_cluster import ClusterItem, ContentCluster
 from app.models.digest import Digest, DigestItem
-from app.models.enums import DigestType, ProcessingStatus, SourceType
+from app.models.enums import DigestType, FeedbackType, ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
 from app.models.feed_item_folder import FeedItemFolder
+from app.models.feedback import Feedback
 from app.models.folder import Folder
 from app.models.reddit_sync_state import RedditSyncState
 from app.models.source import Source
@@ -20,6 +21,8 @@ __all__ = [
     "Digest",
     "DigestItem",
     "DigestType",
+    "Feedback",
+    "FeedbackType",
     "FeedItem",
     "FeedItemFolder",
     "Folder",
