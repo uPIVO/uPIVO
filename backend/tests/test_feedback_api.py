@@ -187,7 +187,7 @@ def _count(factory, table: str) -> int:
 
 def test_put_creates_then_repeats_without_changing_updated_at(api):
     client, factory, _ = api
-    created = _put(client, 1, "feed_item", 101, "useful")
+    created = _put(client, 1, "feed_item", 101, "interested")
     assert created.status_code == 201
     body = created.json()
     assert set(body) == {
@@ -202,24 +202,24 @@ def test_put_creates_then_repeats_without_changing_updated_at(api):
     assert body["user_id"] == 1
     assert body["kind"] == "feed_item"
     assert body["unit_id"] == 101
-    assert body["reaction"] == "useful"
+    assert body["reaction"] == "interested"
     assert body["updated_at"] is None
     assert _count(factory, "feedback") == 1
 
-    repeated = _put(client, 1, "feed_item", 101, "useful")
+    repeated = _put(client, 1, "feed_item", 101, "interested")
     assert repeated.status_code == 200
     assert repeated.json()["id"] == body["id"]
     assert repeated.json()["created_at"] == body["created_at"]
     assert repeated.json()["updated_at"] is None
     row = _row(factory, 1, "feed_item_id", 101)
-    assert row["reaction"] == "useful"
+    assert row["reaction"] == "interested"
     assert row["updated_at"] is None
     assert _count(factory, "feedback") == 1
 
 
 def test_put_replaces_reaction_in_same_row_without_history(api):
     client, factory, _ = api
-    created = _put(client, 1, "feed_item", 101, "useful")
+    created = _put(client, 1, "feed_item", 101, "interested")
     assert created.status_code == 201
 
     replaced = _put(client, 1, "feed_item", 101, "not_interested")
@@ -235,7 +235,7 @@ def test_put_replaces_reaction_in_same_row_without_history(api):
 
 def test_delete_is_physical_and_idempotent(api):
     client, factory, _ = api
-    assert _put(client, 1, "cluster", 1, "useful").status_code == 201
+    assert _put(client, 1, "cluster", 1, "interested").status_code == 201
 
     first = client.delete("/api/users/1/feedback/cluster/1")
     assert first.status_code == 204
@@ -251,7 +251,7 @@ def test_delete_is_physical_and_idempotent(api):
 
 def test_users_are_isolated(api):
     client, _, _ = api
-    assert _put(client, 2, "feed_item", 105, "useful").status_code == 201
+    assert _put(client, 2, "feed_item", 105, "interested").status_code == 201
 
     assert client.get("/api/users/1/feedback/feed_item/105").status_code == 404
     assert client.get("/api/users/1/feedback").json() == []
@@ -266,13 +266,13 @@ def test_users_are_isolated(api):
 
 def test_same_numeric_id_of_different_kinds_is_independent(api):
     client, factory, _ = api
-    assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+    assert _put(client, 1, "feed_item", 101, "interested").status_code == 201
     assert _put(client, 1, "cluster", 101, "not_interested").status_code == 201
     assert _count(factory, "feedback") == 2
 
     feed_item = client.get("/api/users/1/feedback/feed_item/101").json()
     cluster = client.get("/api/users/1/feedback/cluster/101").json()
-    assert (feed_item["kind"], feed_item["reaction"]) == ("feed_item", "useful")
+    assert (feed_item["kind"], feed_item["reaction"]) == ("feed_item", "interested")
     assert (cluster["kind"], cluster["reaction"]) == ("cluster", "not_interested")
     assert feed_item["id"] != cluster["id"]
 
@@ -295,7 +295,7 @@ def test_same_numeric_id_of_different_kinds_is_independent(api):
 )
 def test_put_requires_visible_unit(api, kind, unit_id):
     client, factory, _ = api
-    response = _put(client, 1, kind, unit_id, "useful")
+    response = _put(client, 1, kind, unit_id, "interested")
     assert response.status_code == 404
     assert response.json()["detail"] == "Материал недоступен."
     assert _count(factory, "feedback") == 0
@@ -325,7 +325,7 @@ def test_cluster_is_visible_when_one_member_is_visible(api):
             )
         )
 
-    created = _put(client, 1, "cluster", 3, "useful")
+    created = _put(client, 1, "cluster", 3, "interested")
     assert created.status_code == 201
     assert created.json()["kind"] == "cluster"
     assert created.json()["unit_id"] == 3
@@ -336,13 +336,13 @@ def test_cluster_is_visible_when_one_member_is_visible(api):
 
 def test_old_reaction_survives_source_disable_but_new_put_is_rejected(api):
     client, factory, _ = api
-    assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+    assert _put(client, 1, "feed_item", 101, "interested").status_code == 201
     with factory.begin() as session:
         session.execute(
             text("UPDATE user_sources SET enabled = 0 WHERE user_id = 1 AND source_id = 1")
         )
 
-    assert client.get("/api/users/1/feedback/feed_item/101").json()["reaction"] == "useful"
+    assert client.get("/api/users/1/feedback/feed_item/101").json()["reaction"] == "interested"
     assert _put(client, 1, "feed_item", 101, "not_interested").status_code == 404
     assert client.delete("/api/users/1/feedback/feed_item/101").status_code == 204
     assert client.get("/api/users/1/feedback/feed_item/101").status_code == 404
@@ -350,9 +350,9 @@ def test_old_reaction_survives_source_disable_but_new_put_is_rejected(api):
 
 def test_list_order_filters_and_pagination(api):
     client, factory, _ = api
-    first = _put(client, 1, "feed_item", 101, "useful").json()
+    first = _put(client, 1, "feed_item", 101, "interested").json()
     second = _put(client, 1, "cluster", 101, "not_interested").json()
-    third = _put(client, 1, "cluster", 1, "useful").json()
+    third = _put(client, 1, "cluster", 1, "interested").json()
     assert _count(factory, "feedback") == 3
 
     everything = client.get("/api/users/1/feedback").json()
@@ -380,9 +380,9 @@ def test_bulk_unit_ids_return_existing_reactions_without_pagination(api):
                 "'https://example.test/109', 'normalized')"
             )
         )
-    assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+    assert _put(client, 1, "feed_item", 101, "interested").status_code == 201
     assert _put(client, 1, "feed_item", 109, "not_interested").status_code == 201
-    assert _put(client, 1, "cluster", 101, "useful").status_code == 201
+    assert _put(client, 1, "cluster", 101, "interested").status_code == 201
 
     response = client.get(
         "/api/users/1/feedback?kind=feed_item&unit_id=101&unit_id=109&unit_id=101&limit=1"
@@ -427,7 +427,8 @@ def test_invalid_bulk_size_is_rejected(api):
     "payload",
     [
         {"reaction": "neutral"},
-        {"reaction": "useful", "comment": "лишнее поле"},
+        {"reaction": "useful"},  # прежнее значение: переименовано в 0013
+        {"reaction": "interested", "comment": "лишнее поле"},
         {},
         {"reaction": None},
     ],
@@ -443,7 +444,7 @@ def test_unknown_user_returns_404(api):
     client, _, _ = api
     assert client.get("/api/users/999/feedback").status_code == 404
     assert client.get("/api/users/999/feedback/feed_item/101").status_code == 404
-    assert _put(client, 999, "feed_item", 101, "useful").status_code == 404
+    assert _put(client, 999, "feed_item", 101, "interested").status_code == 404
     assert client.delete("/api/users/999/feedback/feed_item/101").status_code == 404
 
 
@@ -499,10 +500,10 @@ def _session_override(factory, engine=None, user_id: int = 1):
 def test_put_returns_own_snapshot_when_row_is_deleted_after_commit(api, scenario):
     """Ответ PUT не зависит от того, что строка исчезла сразу после commit."""
     client, factory, engine = api
-    reaction = "not_interested" if scenario == "change" else "useful"
+    reaction = "not_interested" if scenario == "change" else "interested"
     before = None
     if scenario != "create":
-        assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+        assert _put(client, 1, "feed_item", 101, "interested").status_code == 201
         before = client.get("/api/users/1/feedback/feed_item/101").json()
 
     app.dependency_overrides[get_db] = _session_override(factory, engine)
@@ -539,7 +540,7 @@ def test_flush_error_rolls_back_and_releases_transaction(api):
     session = factory()
     try:
         with pytest.raises(IntegrityError):
-            set_feedback(session, 1, FeedbackKind.FEED_ITEM, 101, FeedbackType.USEFUL)
+            set_feedback(session, 1, FeedbackKind.FEED_ITEM, 101, FeedbackType.INTERESTED)
         # Транзакция и блокировка строки пользователя освобождены.
         assert not session.in_transaction()
     finally:
@@ -548,4 +549,4 @@ def test_flush_error_rolls_back_and_releases_transaction(api):
 
     with engine.begin() as connection:
         connection.execute(text("DROP TRIGGER feedback_insert_guard"))
-    assert _put(client, 1, "feed_item", 101, "useful").status_code == 201
+    assert _put(client, 1, "feed_item", 101, "interested").status_code == 201

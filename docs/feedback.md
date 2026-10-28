@@ -1,7 +1,7 @@
 # Обратная связь по публикациям и инфоповодам
 
 ITD-89 добавляет явную реакцию пользователя на **отображаемую единицу контента**:
-`useful` («полезно») или `not_interested` («неинтересно»). Сервер хранит одну
+`interested` («Интересно») или `not_interested` («неинтересно»). Сервер хранит одну
 текущую реакцию на пару «пользователь + единица», её можно заменить или снять.
 Реакции сохраняются для будущей персонализации, но в рамках ITD-89 **не влияют**
 на ранжирование, `rank_score`, `relevance_score`, `user_interests`, `user_item_scores`,
@@ -30,7 +30,7 @@ ITD-89 добавляет явную реакцию пользователя н�
 | `user_id` | FK `users.id`, `ON DELETE CASCADE` |
 | `feed_item_id` | FK `feed_items.id`, `ON DELETE CASCADE`, NULL для реакции на кластер |
 | `cluster_id` | FK `content_clusters.id`, `ON DELETE CASCADE`, NULL для реакции на публикацию |
-| `reaction` | PostgreSQL enum `feedback_type`: `useful`, `not_interested` |
+| `reaction` | PostgreSQL enum `feedback_type`: `interested`, `not_interested` |
 | `created_at` | дата создания текущей реакции |
 | `updated_at` | заполняется только при фактической смене реакции |
 
@@ -42,6 +42,14 @@ ITD-89 добавляет явную реакцию пользователя н�
   реакция на пару;
 - индекс `(user_id, created_at DESC, id DESC)` для списка реакций и отдельные
   индексы по `feed_item_id` / `cluster_id` для каскадной очистки.
+
+Цепочка миграций: `0012_feedback` создаёт таблицу и enum `feedback_type` со значениями
+`useful`, `not_interested`; `0013_feedback_interested` переименовывает положительное
+значение `useful` → `interested` (решение Дениса, подпись «Интересно»). Переименование
+значения enum безопасно для существующих строк: PostgreSQL меняет только имя значения,
+`id`, `reaction`-связи и отметки `created_at`/`updated_at` не переписываются, данные не
+теряются; `downgrade` возвращает имя `useful`. Прикладной контракт использует только
+`interested` и `not_interested`, прежнее `useful` в API отклоняется как `422`.
 
 Таблиц `feedback_history`, soft-delete, `deleted_at` и журнала реакций нет:
 `created_at` и `updated_at` описывают только текущее состояние. Реакции не
@@ -61,7 +69,7 @@ ITD-89 добавляет явную реакцию пользователя н�
 | `GET /` | реакции пользователя | `200`, включая `[]` |
 
 `kind` — только `feed_item` или `cluster`; `user_id` и `unit_id` — положительные
-целые. Тело `PUT`: строго `{"reaction": "useful" | "not_interested"}`; лишние поля,
+целые. Тело `PUT`: строго `{"reaction": "interested" | "not_interested"}`; лишние поля,
 пустой JSON и неизвестные значения — `422`. Ответ: `id`, `user_id`, `kind`,
 `unit_id`, `reaction`, `created_at`, `updated_at` — без чужих данных, публикаций,
 AI-оценок и истории.
@@ -141,7 +149,7 @@ AI-оценок и истории.
 - `read_reactions(session, user_id, pairs)` — текущие реакции по смешанным парам
   `(kind, unit_id)` одним запросом к БД, без N+1.
 
-Значения фиксированы: `useful` — положительный сигнал, `not_interested` —
+Значения фиксированы: `interested` — положительный сигнал, `not_interested` —
 отрицательный, отсутствие записи — **сигнала нет**, а не отрицательная реакция.
 Вес реакции, пересчёт оценок и задачи Celery этой задачей не вводятся.
 

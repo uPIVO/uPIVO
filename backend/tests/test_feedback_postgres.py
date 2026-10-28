@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -64,8 +65,9 @@ def _alembic(url: str, *arguments: str) -> str:
     return result.stdout
 
 
-@pytest.fixture
-def database():
+@contextmanager
+def _test_database(revision: str):
+    """Одноразовая БД на указанной ревизии; рабочая база не используется."""
     parent_url = make_url(_URL)
     assert parent_url.database.startswith("itd89_feedback_test"), "Нельзя использовать рабочую БД"
     database_name = f"itd89_feedback_test_{uuid4().hex[:12]}"
@@ -73,7 +75,7 @@ def database():
     with admin.connect() as connection:
         connection.execute(text(f'CREATE DATABASE "{database_name}"'))
     url = parent_url.set(database=database_name).render_as_string(hide_password=False)
-    _alembic(url, "upgrade", "head")
+    _alembic(url, "upgrade", revision)
     engine = create_engine(url)
     try:
         yield SimpleNamespace(engine=engine, url=url)
@@ -82,6 +84,18 @@ def database():
         with admin.connect() as connection:
             connection.execute(text(f'DROP DATABASE "{database_name}" WITH (FORCE)'))
         admin.dispose()
+
+
+@pytest.fixture
+def database():
+    with _test_database("head") as test_database:
+        yield test_database
+
+
+@pytest.fixture
+def database_0012():
+    with _test_database("0012_feedback") as test_database:
+        yield test_database
 
 
 def _user(session: Session) -> User:
@@ -134,6 +148,19 @@ def _cluster(session: Session, items: list[FeedItem]) -> ContentCluster:
         )
     session.flush()
     return cluster
+
+
+def _feedback_rows(session: Session) -> list[dict]:
+    """Сырое чтение строк feedback: старое значение enum ORM прочитать не может."""
+    return [
+        dict(row)
+        for row in session.execute(
+            text(
+                "SELECT id, user_id, feed_item_id, cluster_id, reaction::text AS reaction, "
+                "created_at, updated_at FROM feedback ORDER BY id"
+            )
+        ).mappings()
+    ]
 
 
 def _run(targets: list[Callable[[], None]]) -> list[Exception]:
@@ -209,15 +236,17 @@ def test_migration_upgrade_downgrade_reupgrade(database):
         "fk_feedback_feed_item_id_feed_items",
         "fk_feedback_cluster_id_content_clusters",
     } <= names["foreign_key"]
-    assert _enum_labels(url, "feedback_type") == ["useful", "not_interested"]
+    assert _enum_labels(url, "feedback_type") == ["interested", "not_interested"]
 
-    _alembic(url, "downgrade", "-1")
+    # `0013_feedback_interested` только переименовывает значение enum, поэтому
+    # таблица удаляется откатом до `0011_user_interests`.
+    _alembic(url, "downgrade", "0011_user_interests")
     assert not _table_exists(url, "feedback")
     assert _enum_labels(url, "feedback_type") == []
 
     _alembic(url, "upgrade", "head")
     assert _table_exists(url, "feedback")
-    assert _enum_labels(url, "feedback_type") == ["useful", "not_interested"]
+    assert _enum_labels(url, "feedback_type") == ["interested", "not_interested"]
 
     engine = create_engine(url)
     try:
@@ -228,11 +257,91 @@ def test_migration_upgrade_downgrade_reupgrade(database):
             user_id, item_id = user.id, item.id
             session.commit()
             feedback, created = set_feedback(
-                session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.USEFUL
+                session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.INTERESTED
             )
         assert created is True
         assert feedback.kind == FeedbackKind.FEED_ITEM
         assert feedback.unit_id == item_id
+    finally:
+        engine.dispose()
+
+
+def test_rename_value_migration_keeps_rows(database_0012):
+    """0013 переименовывает значение enum, не переписывая строки feedback."""
+    url = database_0012.url
+    database_0012.engine.dispose()
+
+    # Строки создаются на ревизии 0012, где положительное значение ещё `useful`:
+    # новый ORM его не читает, поэтому seed и сверка идут сырым SQL.
+    engine = create_engine(url)
+    with Session(engine) as session:
+        user = _user(session)
+        source = _source(session, user)
+        item = _item(session, source)
+        member = _item(session, source)
+        cluster = _cluster(session, [member])
+        user_id, item_id, cluster_id = user.id, item.id, cluster.id
+        session.commit()
+        session.execute(
+            text(
+                "INSERT INTO feedback (user_id, feed_item_id, reaction) "
+                "VALUES (:user_id, :item_id, 'useful')"
+            ),
+            {"user_id": user_id, "item_id": item_id},
+        )
+        session.execute(
+            text(
+                "INSERT INTO feedback (user_id, cluster_id, created_at, updated_at, reaction) "
+                "VALUES (:user_id, :cluster_id, CURRENT_TIMESTAMP - interval '1 hour', "
+                "CURRENT_TIMESTAMP - interval '30 minutes', 'useful')"
+            ),
+            {"user_id": user_id, "cluster_id": cluster_id},
+        )
+        session.commit()
+        before = _feedback_rows(session)
+    engine.dispose()
+
+    assert [row["reaction"] for row in before] == ["useful", "useful"]
+
+    _alembic(url, "upgrade", "0013_feedback_interested")
+    engine = create_engine(url)
+    try:
+        with Session(engine) as session:
+            after_upgrade = _feedback_rows(session)
+            assert [row["reaction"] for row in after_upgrade] == ["interested", "interested"]
+            for old, new in zip(before, after_upgrade, strict=True):
+                assert new["id"] == old["id"]
+                assert new["user_id"] == old["user_id"]
+                assert new["feed_item_id"] == old["feed_item_id"]
+                assert new["cluster_id"] == old["cluster_id"]
+                assert new["created_at"] == old["created_at"]
+                assert new["updated_at"] == old["updated_at"]
+            # Новый ORM читает переименованное значение.
+            feedback = get_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id)
+            assert feedback.reaction == FeedbackType.INTERESTED
+    finally:
+        engine.dispose()
+
+    _alembic(url, "downgrade", "0012_feedback")
+    engine = create_engine(url)
+    try:
+        with Session(engine) as session:
+            after_downgrade = _feedback_rows(session)
+        assert [row["reaction"] for row in after_downgrade] == ["useful", "useful"]
+        for old, new in zip(before, after_downgrade, strict=True):
+            assert new["id"] == old["id"]
+            assert new["created_at"] == old["created_at"]
+            assert new["updated_at"] == old["updated_at"]
+    finally:
+        engine.dispose()
+
+    _alembic(url, "upgrade", "head")
+    engine = create_engine(url)
+    try:
+        with Session(engine) as session:
+            reupgraded = _feedback_rows(session)
+            assert [row["reaction"] for row in reupgraded] == ["interested", "interested"]
+            assert [row["id"] for row in reupgraded] == [row["id"] for row in before]
     finally:
         engine.dispose()
 
@@ -249,7 +358,7 @@ def test_check_xor_and_enum_are_enforced_by_database(database):
 
         with pytest.raises(IntegrityError):
             session.execute(
-                text("INSERT INTO feedback (user_id, reaction) VALUES (:user_id, 'useful')"),
+                text("INSERT INTO feedback (user_id, reaction) VALUES (:user_id, 'interested')"),
                 {"user_id": user_id},
             )
         session.rollback()
@@ -258,7 +367,7 @@ def test_check_xor_and_enum_are_enforced_by_database(database):
             session.execute(
                 text(
                     "INSERT INTO feedback (user_id, feed_item_id, cluster_id, reaction) "
-                    "VALUES (:user_id, :item_id, :cluster_id, 'useful')"
+                    "VALUES (:user_id, :item_id, :cluster_id, 'interested')"
                 ),
                 {"user_id": user_id, "item_id": item_id, "cluster_id": cluster_id},
             )
@@ -289,20 +398,20 @@ def test_unique_pair_and_cascade_delete(database):
         item_id, cluster_id = item.id, cluster.id
         session.commit()
 
-        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.USEFUL)
-        set_feedback(session, user_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.USEFUL)
+        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.INTERESTED)
+        set_feedback(session, user_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.INTERESTED)
         set_feedback(
             session, other_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.NOT_INTERESTED
         )
         assert set_feedback(
-            session, other_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.USEFUL
+            session, other_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.INTERESTED
         )[1]
 
         with pytest.raises(IntegrityError):
             session.execute(
                 text(
                     "INSERT INTO feedback (user_id, feed_item_id, reaction) "
-                    "VALUES (:user_id, :item_id, 'useful')"
+                    "VALUES (:user_id, :item_id, 'interested')"
                 ),
                 {"user_id": user_id, "item_id": item_id},
             )
@@ -312,7 +421,7 @@ def test_unique_pair_and_cascade_delete(database):
             session.execute(
                 text(
                     "INSERT INTO feedback (user_id, cluster_id, reaction) "
-                    "VALUES (:user_id, :cluster_id, 'useful')"
+                    "VALUES (:user_id, :cluster_id, 'interested')"
                 ),
                 {"user_id": user_id, "cluster_id": cluster_id},
             )
@@ -349,8 +458,8 @@ def test_cascade_delete_from_user(database):
         user_id, item_id, cluster_id = user.id, item.id, cluster.id
         session.commit()
 
-        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.USEFUL)
-        set_feedback(session, user_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.USEFUL)
+        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.INTERESTED)
+        set_feedback(session, user_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.INTERESTED)
         assert len(list(session.scalars(select(Feedback.id)))) == 2
 
         # Сначала убираем подписки: их FK на users не каскадный.
@@ -382,14 +491,14 @@ def test_concurrent_put_keeps_single_row(database):
 
         return run
 
-    errors = _run([writer(FeedbackType.USEFUL), writer(FeedbackType.NOT_INTERESTED)])
+    errors = _run([writer(FeedbackType.INTERESTED), writer(FeedbackType.NOT_INTERESTED)])
     assert errors == []
     assert sorted(created for _, created in results) == [False, True]
 
     with Session(engine) as session:
         rows = list(session.scalars(select(Feedback).where(Feedback.user_id == user_id)))
         assert len(rows) == 1
-        assert rows[0].reaction in (FeedbackType.USEFUL, FeedbackType.NOT_INTERESTED)
+        assert rows[0].reaction in (FeedbackType.INTERESTED, FeedbackType.NOT_INTERESTED)
 
 
 def test_concurrent_put_and_delete_keep_at_most_one_row(database):
@@ -400,7 +509,7 @@ def test_concurrent_put_and_delete_keep_at_most_one_row(database):
         item = _item(session, source)
         user_id, item_id = user.id, item.id
         session.commit()
-        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.USEFUL)
+        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, item_id, FeedbackType.INTERESTED)
 
     barrier = threading.Barrier(2)
 
@@ -454,30 +563,30 @@ def test_availability_and_isolation_on_postgres(database):
         session.commit()
 
         assert set_feedback(
-            session, ids.user, FeedbackKind.FEED_ITEM, ids.standalone, FeedbackType.USEFUL
+            session, ids.user, FeedbackKind.FEED_ITEM, ids.standalone, FeedbackType.INTERESTED
         )[1]
         assert set_feedback(
             session, ids.user, FeedbackKind.CLUSTER, ids.mixed_cluster, FeedbackType.NOT_INTERESTED
         )[1]
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
-                session, ids.user, FeedbackKind.FEED_ITEM, ids.member, FeedbackType.USEFUL
+                session, ids.user, FeedbackKind.FEED_ITEM, ids.member, FeedbackType.INTERESTED
             )
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
-                session, ids.user, FeedbackKind.FEED_ITEM, ids.hidden, FeedbackType.USEFUL
+                session, ids.user, FeedbackKind.FEED_ITEM, ids.hidden, FeedbackType.INTERESTED
             )
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
-                session, ids.user, FeedbackKind.FEED_ITEM, ids.pending, FeedbackType.USEFUL
+                session, ids.user, FeedbackKind.FEED_ITEM, ids.pending, FeedbackType.INTERESTED
             )
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
-                session, ids.user, FeedbackKind.CLUSTER, ids.hidden_cluster, FeedbackType.USEFUL
+                session, ids.user, FeedbackKind.CLUSTER, ids.hidden_cluster, FeedbackType.INTERESTED
             )
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
-                session, ids.user, FeedbackKind.CLUSTER, ids.cluster + 1000, FeedbackType.USEFUL
+                session, ids.user, FeedbackKind.CLUSTER, ids.cluster + 1000, FeedbackType.INTERESTED
             )
 
         # Реакции разных пользователей независимы и не пересекаются в выдаче.
@@ -486,7 +595,7 @@ def test_availability_and_isolation_on_postgres(database):
         )
         assert (
             get_feedback(session, ids.user, FeedbackKind.FEED_ITEM, ids.standalone).reaction
-            == FeedbackType.USEFUL
+            == FeedbackType.INTERESTED
         )
         assert {item.user_id for item in list_feedback(session, ids.user)} == {ids.user}
 
@@ -498,7 +607,7 @@ def test_availability_and_isolation_on_postgres(database):
         session.commit()
         assert (
             get_feedback(session, ids.user, FeedbackKind.FEED_ITEM, ids.standalone).reaction
-            == FeedbackType.USEFUL
+            == FeedbackType.INTERESTED
         )
         with pytest.raises(UnavailableFeedbackTargetError):
             set_feedback(
@@ -524,7 +633,7 @@ def test_batch_reads_use_single_query(database):
         user_id, first_id, second_id, cluster_id = user.id, first.id, second.id, cluster.id
         session.commit()
 
-        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, first_id, FeedbackType.USEFUL)
+        set_feedback(session, user_id, FeedbackKind.FEED_ITEM, first_id, FeedbackType.INTERESTED)
         set_feedback(
             session, user_id, FeedbackKind.CLUSTER, cluster_id, FeedbackType.NOT_INTERESTED
         )
@@ -546,7 +655,7 @@ def test_batch_reads_use_single_query(database):
                 ],
             )
             assert found == {
-                (FeedbackKind.FEED_ITEM, first_id): FeedbackType.USEFUL,
+                (FeedbackKind.FEED_ITEM, first_id): FeedbackType.INTERESTED,
                 (FeedbackKind.CLUSTER, cluster_id): FeedbackType.NOT_INTERESTED,
             }
             assert len(statements) == 1

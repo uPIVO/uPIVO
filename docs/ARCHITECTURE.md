@@ -45,7 +45,7 @@ User layer: `User` → `UserSource` → персональная лента и �
 DB-backed оценка по интересам переиспользует `ContentUnitAnalysisUseCase` и
 `user_item_scores`; правила и стык с ITD-85 описаны в
 [документации интересов](user-interests.md).
-`Feedback` хранит одну текущую реакцию пользователя (`useful` / `not_interested`)
+`Feedback` хранит одну текущую реакцию пользователя (`interested` / `not_interested`)
 на одиночную публикацию или целый инфоповод; правила показа и API описаны в
 [документации обратной связи](feedback.md). Предикат доступности единицы общий
 для ленты и обратной связи (`app/services/visibility.py`).

@@ -28,7 +28,7 @@ class DigestType(StrEnum):
 class FeedbackType(StrEnum):
     """Явная реакция пользователя на единицу контента."""
 
-    USEFUL = "useful"
+    INTERESTED = "interested"
     NOT_INTERESTED = "not_interested"
 
 
