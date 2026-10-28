@@ -96,10 +96,12 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
 
 ## Границы кода
 
-- `api`: HTTP-маршруты здоровья, Habr, источников и тем
+- `api`: HTTP-маршруты здоровья, регистрации и входа
+  (`/api/auth/register`, `/api/auth/login`), Habr, источников и тем
   (`/api/users/{user_id}/sources`, `/api/users/{user_id}/topics`), ленты
   (`/api/feed`) и дайджестов (`/api/digests`).
-  Авторизации нет: в пути передаётся `users.id`.
+  Регистрация и вход проверяют email и пароль. Остальные пользовательские
+  маршруты по-прежнему принимают `users.id` в пути и не требуют токен.
 - `core`: env-конфигурация и logging, без секретов в логах.
 - `db`: Declarative Base, lazy engine, dependency session; запросы синхронные.
 - `models`: ORM `User` / `UserSource` / `Source` / `FeedItem` / `ContentCluster` /
@@ -123,7 +125,7 @@ Jev / TypeSafe оценивает готовую выжимку: Noul для р�
   склейка. Summary не вызывается.
 - `ai`: provider-neutral интерфейс и ручные сценарии анализа FeedItem.
 - `workers`: опциональная конфигурация Celery, пока без задач/расписаний.
-- `auth`: зарезервировано; схема авторизации не выбрана.
+- `auth`: scrypt-хеш пароля и подписанный HMAC-токен входа. Не JWT, не Firebase и не OAuth.
 
 API не подключается к БД при импорте/старте. `/health` проверяет процесс,
 `/health/db` проверяет БД и возвращает 503 без деталей ошибок при недоступности.
@@ -131,7 +133,9 @@ Compose запускает миграции отдельно перед API; п�
 Session закрывается dependency; сценарии сбора выполняют commit/rollback своих записей.
 Нет автоматического commit после HTTP-запроса.
 
-Не вводим Firebase/OAuth/JWT до решения команды. Frontend Next.js + TypeScript
-начнётся в следующем модуле. Production hosting и auth остаются решениями техлида.
+Вход — email и пароль; токен подписан HMAC (`AUTH_TOKEN_SECRET`). Firebase, OAuth и JWT
+не используются. Существующие пользовательские API этим входом не закрываются.
+Frontend Next.js + TypeScript начнётся в следующем модуле. Production hosting
+остаётся решением техлида.
 AI-провайдеры ручного сценария настраиваются через env;
 существующая инфраструктура предназначена для разработки.

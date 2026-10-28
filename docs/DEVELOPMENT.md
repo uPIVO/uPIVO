@@ -135,13 +135,14 @@ uv run python -m app.processing
 Telegram, Reddit и Habr; публикации остаются в общих `feed_items`.
 `--user` синхронизирует только включённые источники выбранного пользователя через
 общий dispatcher; источники других пользователей не опрашиваются. Основной запуск
-без `--user` по-прежнему собирает каждый DISTINCT enabled Source один раз. Нет
-login/OAuth — пользователь задаётся id или email. Feed/Digest HTTP API только
+без `--user` по-прежнему собирает каждый DISTINCT enabled Source один раз. Сбор
+не проверяет пароль: пользователь задаётся id или email. Feed/Digest HTTP API только
 читает сохранённые публикации и не запускает collection.
 
 Нужны PostgreSQL и `alembic upgrade head`. Пользователь и связи `user_sources`
-должны уже быть в базе (колонка `password_hash` есть в схеме, авторизации нет —
-для локальной записи достаточно любого непустого значения):
+должны уже быть в базе. Учётную запись можно создать через
+`POST /api/auth/register`. Для локального сборщика достаточно строки `users`;
+хеш при сборе не проверяется:
 
 ```sql
 INSERT INTO users (email, password_hash)
@@ -239,11 +240,34 @@ uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
 Ошибка сбора — код 1, после того как pending-строки уже нормализованы и склеены.
 Нет `--user` и нет `--fixture` — код 2.
 
+## Регистрация и вход
+
+`POST /api/auth/register` создаёт `users` по email и паролю. В `password_hash`
+хранится scrypt-хеш, не пароль. Пароль короче 8 символов — HTTP 422. Повторный
+email, без учёта регистра — HTTP 409 `{"detail":"Email already registered"}`.
+
+`POST /api/auth/login` проверяет пару и возвращает подписанный токен
+(`token`, `token_type: bearer`, `user_id`, `email`). Неизвестный email — 401
+`{"detail":"Unknown user"}`. Неверный пароль — 401 `{"detail":"Wrong password"}`.
+Токен подписывается `AUTH_TOKEN_SECRET`; в development есть значение по умолчанию.
+Маршруты источников, тем, ленты и дайджестов токен не требуют.
+
+Из `backend/`, API уже запущен (`uv run uvicorn app.main:app --reload`):
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"email":"demo@example.com","password":"correct-horse"}'
+curl -s -X POST http://127.0.0.1:8000/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"demo@example.com","password":"correct-horse"}'
+```
+
 ## Темы и источники
 
 HTTP API управляет связями `user_sources` и тематическими папками `folders` /
-`feed_item_folders`. Авторизация в этот API не входит: в пути передаётся уже
-существующий `users.id`. Логин, JWT и OAuth здесь не добавляются.
+`feed_item_folders`. Эти маршруты не требуют токен: в пути передаётся уже
+существующий `users.id`. Учётную запись создаёт `POST /api/auth/register`.
 
 Источник общий: повторное подключение того же канала не создаёт вторую строку
 `sources`, а только связь пользователя. Выключение меняет `user_sources.enabled`.
@@ -254,7 +278,9 @@ HTTP API управляет связями `user_sources` и тематичес�
 Тема — папка общей ленты. В неё кладётся id публикации из `feed_items`, без копии
 материала и без избранного.
 
-Нужны PostgreSQL и `uv run alembic upgrade head`. Пользователь создаётся отдельно:
+Нужны PostgreSQL и `uv run alembic upgrade head`. Пользователя можно
+зарегистрировать через `POST /api/auth/register` или вставить строку для
+маршрутов, которые не проверяют пароль:
 
 ```sql
 INSERT INTO users (email, password_hash)

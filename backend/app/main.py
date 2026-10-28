@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from app.api.auth import router as auth_router
 from app.api.digest import router as digest_router
 from app.api.feed import router as feed_router
 from app.api.habr import router as habr_router
@@ -28,6 +29,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(auth_router, prefix="/api")
 app.include_router(habr_router, prefix="/api")
 app.include_router(sources_router, prefix="/api")
 app.include_router(topics_router, prefix="/api")
