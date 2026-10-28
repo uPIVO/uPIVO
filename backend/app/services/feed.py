@@ -6,10 +6,9 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster
-from app.models.enums import ProcessingStatus, SourceType
+from app.models.enums import SourceType
 from app.models.feed_item import FeedItem
 from app.models.source import Source
-from app.models.user_source import UserSource
 from app.schemas.feed import (
     FeedItemDetail,
     FeedItemListItem,
@@ -17,6 +16,7 @@ from app.schemas.feed import (
     SourceBrief,
 )
 from app.services.users import require_user
+from app.services.visibility import feed_item_visible
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +55,9 @@ class FeedService:
                 ContentCluster.summary.label("cluster_summary"),
             )
             .join(Source, FeedItem.source_id == Source.id)
-            .join(
-                UserSource,
-                (UserSource.source_id == Source.id)
-                & (UserSource.user_id == user_id)
-                & (UserSource.enabled.is_(True)),
-            )
             .outerjoin(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
             .outerjoin(ContentCluster, ContentCluster.id == ClusterItem.cluster_id)
-            .where(
-                FeedItem.processing_status.in_(
-                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                )
-            )
+            .where(feed_item_visible(user_id))
         )
 
         if source_type:
@@ -226,20 +216,9 @@ class FeedService:
         query = (
             select(FeedItem, Source, ClusterItem.cluster_id, ContentCluster)
             .join(Source, FeedItem.source_id == Source.id)
-            .join(
-                UserSource,
-                (UserSource.source_id == Source.id)
-                & (UserSource.user_id == user_id)
-                & (UserSource.enabled.is_(True)),
-            )
             .outerjoin(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
             .outerjoin(ContentCluster, ContentCluster.id == ClusterItem.cluster_id)
-            .where(
-                FeedItem.id == item_id,
-                FeedItem.processing_status.in_(
-                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                ),
-            )
+            .where(feed_item_visible(user_id), FeedItem.id == item_id)
         )
         row = self.db.execute(query).first()
         if not row:
@@ -272,17 +251,9 @@ class FeedService:
                 select(FeedItem, Source)
                 .join(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
                 .join(Source, FeedItem.source_id == Source.id)
-                .join(
-                    UserSource,
-                    (UserSource.source_id == Source.id)
-                    & (UserSource.user_id == user_id)
-                    & (UserSource.enabled.is_(True)),
-                )
                 .where(
                     ClusterItem.cluster_id == cluster_id,
-                    FeedItem.processing_status.in_(
-                        (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                    ),
+                    feed_item_visible(user_id),
                 )
                 .order_by(
                     ClusterItem.is_primary.desc(),

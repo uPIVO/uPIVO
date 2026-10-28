@@ -25,6 +25,13 @@ class DigestType(StrEnum):
     TOPIC = "topic"
 
 
+class FeedbackType(StrEnum):
+    """Явная реакция пользователя на единицу контента."""
+
+    USEFUL = "useful"
+    NOT_INTERESTED = "not_interested"
+
+
 def pg_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
     return SAEnum(
         enum_cls,
@@ -38,3 +45,4 @@ def pg_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
 source_type_enum = pg_enum(SourceType, "source_type")
 processing_status_enum = pg_enum(ProcessingStatus, "processing_status")
 digest_type_enum = pg_enum(DigestType, "digest_type")
+feedback_type_enum = pg_enum(FeedbackType, "feedback_type")
