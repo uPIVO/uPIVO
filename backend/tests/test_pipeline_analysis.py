@@ -786,10 +786,8 @@ def test_text_change_after_processed_and_broker_failure_retries_dispatch_only(fa
     assert len(importance.calls) == 2
     assert failed.queue_failed == 1
     assert _statuses(factory) == {item_ids[0]: ProcessingStatus.PROCESSED}
-    # Квитанция осталась с анализа до изменения текста и потому не совпадает.
-    snapshot = _snapshot(factory, "feed_item", item_ids[0])
-    assert snapshot.relevance_dispatch is not None
-    assert snapshot.relevance_dispatch.input_fingerprint != snapshot.input_fingerprint
+    # Подтверждение очистило квитанцию до commit, постановка не удалась.
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is None
 
     working = _Dispatcher()
     resumed = _run(factory, summarizer=summarizer, importance=importance, dispatch=working)
@@ -871,3 +869,63 @@ def test_receipt_survives_unrelated_result_save(factory):
     assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch == (
         snapshot.relevance_dispatch
     )
+
+
+def test_importance_model_change_with_broker_failure_retries_dispatch_only(factory):
+    """Пересчёт одной важности не должен терять повторную постановку."""
+
+    _source_id, item_ids = _add_items(factory, 1)
+    summarizer, importance = _Summarizer(), _Importance()
+    _run(factory, summarizer=summarizer, importance=importance, dispatch=_Dispatcher())
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is not None
+
+    importance.model = "test-v2"
+    broken = _Dispatcher(fail=True)
+    failed = _run(factory, summarizer=summarizer, importance=importance, dispatch=broken)
+
+    assert failed.queue_failed == 1
+    assert summarizer.calls == [f"feed_item:{item_ids[0]}"]
+    assert len(importance.calls) == 2
+    # Подтверждение очистило квитанцию до commit, постановка не удалась.
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is None
+    assert _statuses(factory) == {item_ids[0]: ProcessingStatus.PROCESSED}
+
+    working = _Dispatcher()
+    resumed = _run(factory, summarizer=summarizer, importance=importance, dispatch=working)
+
+    assert summarizer.calls == [f"feed_item:{item_ids[0]}"]
+    assert len(importance.calls) == 2
+    assert working.posted == [("feed_item", item_ids[0])]
+    assert resumed.succeeded == 1
+    assert resumed.reused == 1
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is not None
+
+
+def test_confirm_clears_receipt_only_after_successful_validation(factory):
+    _source_id, item_ids = _add_items(factory, 1)
+    summarizer, importance, dispatcher = _Summarizer(), _Importance(), _Dispatcher()
+    _run(factory, summarizer=summarizer, importance=importance, dispatch=dispatcher)
+    snapshot = _snapshot(factory, "feed_item", item_ids[0])
+    assert snapshot.relevance_dispatch is not None
+    repository = ContentUnitAnalysisRepository()
+
+    def confirm(summary: SummaryResult) -> bool:
+        with factory() as session, session.begin():
+            return repository.mark_unit_processed(
+                session,
+                kind="feed_item",
+                unit_id=item_ids[0],
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                expected_summary=summary,
+                expected_importance=snapshot.importance_result,
+            )
+
+    foreign = _summary_result("Чужая выжимка", snapshot.summary_result.fingerprint)
+
+    assert confirm(foreign) is False
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is not None
+
+    # Все участники уже processed: квитанция всё равно очищается до commit.
+    assert confirm(snapshot.summary_result) is True
+    assert _statuses(factory) == {item_ids[0]: ProcessingStatus.PROCESSED}
+    assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is None

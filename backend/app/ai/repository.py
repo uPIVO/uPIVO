@@ -404,8 +404,14 @@ class ContentUnitAnalysisRepository:
         под существующими блокировками `_load_unit(lock=True)`: текущий состав,
         отпечаток входа, актуальные summary/importance совпадают с результатами
         этого запуска, а все участники нормализованы. Если публикация успела
-        стать участником кластера или результаты изменились, статусы не
-        меняются и возвращается False.
+        стать участником кластера или результаты изменились, статусы и квитанция
+        не меняются и возвращается False.
+
+        Успешное подтверждение атомарно очищает квитанцию `relevance_dispatch` до
+        commit, даже если все участники уже `processed`: выбранная единица будет
+        отправлена после этого commit, значит постановка снова ожидает квитанции.
+        Так сбой брокера после пересчёта важности без изменения входа/выжимки не
+        теряет повторную постановку.
         """
         self._target_id(kind, unit_id, None)
         loaded = self._load_unit(session, kind, unit_id, lock=True)
@@ -443,13 +449,16 @@ class ContentUnitAnalysisRepository:
         pending = [
             item_id for item_id, status in statuses.items() if status != ProcessingStatus.PROCESSED
         ]
-        if not pending:
-            return True
-        session.execute(
-            update(FeedItem)
-            .where(FeedItem.id.in_(pending))
-            .values(processing_status=ProcessingStatus.PROCESSED)
-        )
+        if loaded.metadata.relevance_dispatch is not None:
+            self._write_feed_metadata(
+                loaded.row, loaded.metadata.model_copy(update={"relevance_dispatch": None})
+            )
+        if pending:
+            session.execute(
+                update(FeedItem)
+                .where(FeedItem.id.in_(pending))
+                .values(processing_status=ProcessingStatus.PROCESSED)
+            )
         session.flush()
         return True
 
