@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import habr
@@ -174,3 +175,68 @@ def test_habr_sync_limit_stores_three_from_a_longer_list():
     assert full_text_ids == article_ids[:3]
     assert pages == [(1, "date")]
     assert db.committed is True
+
+
+def test_habr_sync_commits_source_and_each_page_before_later_failure():
+    """Сеть не идёт внутри транзакции, а сбой страницы не теряет предыдущие."""
+    events = []
+
+    class FakeClient:
+        clean_html = staticmethod(HabrClient.clean_html)
+
+        async def get_articles_page(self, page=1, sort="date"):
+            events.append(f"page{page}_network")
+            if page == 2:
+                raise RuntimeError("habr down")
+            return {
+                "articleIds": ["101"],
+                "articleRefs": {
+                    "101": {
+                        "id": "101",
+                        "titleHtml": "Title",
+                        "textHtml": "lead",
+                        "author": {"alias": "author"},
+                        "timePublished": "2026-10-07T10:00:00+00:00",
+                    }
+                },
+            }
+
+        async def get_full_article_content(self, article_id):
+            events.append(f"full:{article_id}")
+            return f"full {article_id}"
+
+    class FakeDb:
+        def __init__(self):
+            self.commits = 0
+            self.added = []
+
+        def scalar(self, _statement):
+            events.append("source_upsert")
+            return 1
+
+        def scalars(self, _statement):
+            events.append("existing_read")
+            return SimpleNamespace(all=lambda: [])
+
+        def add(self, item):
+            self.added.append(item)
+            events.append(f"add:{item.external_id}")
+
+        def commit(self):
+            self.commits += 1
+            events.append("commit")
+
+    db = FakeDb()
+    with pytest.raises(RuntimeError, match="habr down"):
+        asyncio.run(HabrService(db, FakeClient()).sync_publications(pages=2))
+
+    # Источник и прочитанные id фиксируются до сетевых вызовов.
+    assert events.index("source_upsert") < events.index("page1_network")
+    assert events.index("commit") < events.index("page1_network")
+    first_read_commit = events.index("commit", events.index("existing_read"))
+    assert first_read_commit < events.index("full:101")
+    # Первая страница сохранена и закоммичена до падения второй.
+    assert [item.external_id for item in db.added] == ["101"]
+    saved_commit = events.index("commit", events.index("add:101"))
+    assert saved_commit < events.index("page2_network")
+    assert db.commits == 3

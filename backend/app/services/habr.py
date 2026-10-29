@@ -25,6 +25,13 @@ class HabrService:
     async def sync_publications(
         self, pages: int = 1, sort: str = "date", limit: int | None = None
     ) -> HabrSyncResponse:
+        """Собрать статьи Habr, сохраняя каждую страницу отдельно.
+
+        Каталог источника коммитится до сетевых вызовов, читающая транзакция
+        завершается до загрузки полных текстов, а страница коммитится сразу
+        после сохранения: сбой следующей страницы не уничтожает уже сохранённое
+        и не держит транзакцию открытой во время HTTP.
+        """
         if limit is not None and limit < 1:
             raise ValueError("limit must be >= 1")
         source_id = self.db.scalar(
@@ -42,6 +49,8 @@ class HabrService:
             )
             .returning(Source.id)
         )
+        # Источник фиксируется до первой сетевой операции.
+        self.db.commit()
 
         fetched = saved = skipped = 0
         seen: set[str] = set()
@@ -66,6 +75,8 @@ class HabrService:
                     )
                 ).all()
             )
+            # Читающая транзакция завершается до загрузки полных текстов.
+            self.db.commit()
 
             new_ids = []
             for article_id in article_ids:
@@ -126,11 +137,12 @@ class HabrService:
                     saved += 1
                 except Exception:
                     logger.exception("Habr article %s could not be stored", article_id)
+            # Каждая страница сохраняется сразу: следующая может упасть.
+            self.db.commit()
 
         if fetched and not saved and not skipped:
             raise ValueError("No fetched Habr articles could be stored")
 
-        self.db.commit()
         return HabrSyncResponse(fetched=fetched, saved=saved, skipped=skipped)
 
     def get_posts(self, limit: int = 20, offset: int = 0) -> list[FeedItem]:

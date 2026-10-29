@@ -87,7 +87,7 @@ class _SourceSession:
         self.commits += 1
 
 
-def test_sync_source_delegates_to_youtube_service(monkeypatch):
+def test_sync_source_fetches_youtube_before_the_write_transaction(monkeypatch):
     source = SimpleNamespace(
         id=10,
         type=SourceType.YOUTUBE,
@@ -95,24 +95,41 @@ def test_sync_source_delegates_to_youtube_service(monkeypatch):
         external_id="c",
     )
     sessions = []
+    events = []
+    fetch = SimpleNamespace(items=[object()])
 
     def factory():
+        events.append("session")
         session = _SourceSession(source)
         sessions.append(session)
         return session
 
-    calls = []
+    class FakeConnector:
+        def fetch(self, url, *, limit, session=None, session_factory=None):
+            assert url == "https://youtube.test/channel"
+            assert limit == 3
+            # Пишущая сессия ещё не открыта: HTTP идёт вне транзакции.
+            assert len(sessions) == 1
+            assert session is None
+            assert session_factory is factory
+            events.append("fetch")
+            return fetch
 
-    def fake_collect(session, url, *, limit, source):
-        calls.append((session, url, limit, source))
-        return SimpleNamespace(items=[object()]), SimpleNamespace(inserted=1, updated=0)
+    def fake_persist(session, given_fetch, *, source):
+        events.append("persist")
+        assert given_fetch is fetch
+        assert source is sessions[-1].source
+        return SimpleNamespace(inserted=2, updated=1)
 
-    monkeypatch.setattr(source_sync, "collect_channel", fake_collect)
+    monkeypatch.setattr(source_sync, "YouTubeConnector", FakeConnector)
+    monkeypatch.setattr(source_sync, "persist_fetch", fake_persist)
     result = asyncio.run(source_sync.sync_source(10, session_factory=factory, limit=3))
-    assert len(calls) == 1
-    assert calls[0][2:] == (3, source)
+
+    # Первая сессия — чтение каталога, вторая — короткая запись.
+    assert events == ["session", "fetch", "session", "persist"]
     assert sessions[-1].commits == 1
-    assert (result.fetched, result.saved, result.inserted, result.updated) == (1, 1, 1, 0)
+    assert (result.fetched, result.saved, result.inserted, result.updated) == (1, 3, 2, 1)
+    assert result.status == "collected"
 
 
 def test_sync_source_delegates_to_reddit_service(monkeypatch):

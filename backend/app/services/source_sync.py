@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.connectors.habr.client import HabrClient
 from app.connectors.telegram.client import TelegramConnector
-from app.connectors.youtube import DEFAULT_LIMIT, collect_channel
+from app.connectors.youtube import DEFAULT_LIMIT, YouTubeConnector
+from app.connectors.youtube.persist import persist_fetch
 from app.db.session import get_engine
 from app.models.enums import SourceType
 from app.models.source import Source
@@ -60,11 +61,14 @@ async def sync_source(
 
     try:
         if source_type is SourceType.YOUTUBE:
+            # HTTP-запросы (RSS и субтитры) идут вне пишущей транзакции: кэш
+            # расшифровок читается в отдельных коротких сессиях фабрики.
+            fetch = YouTubeConnector().fetch(
+                url, limit=limit or DEFAULT_LIMIT, session_factory=factory
+            )
             with factory() as session:
                 source = session.get(Source, source_id)
-                fetch, stats = collect_channel(
-                    session, source.canonical_url, limit=limit or DEFAULT_LIMIT, source=source
-                )
+                stats = persist_fetch(session, fetch, source=source)
                 session.commit()
             return SourceSyncResult(
                 source_id, source_type.value, "collected" if fetch.items else "empty",

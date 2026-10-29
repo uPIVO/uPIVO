@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     typesafe_base_url: str = "https://api.typesafe.ai"
     typesafe_model: str = "jev-1.14.0"
     typesafe_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    # ITD-84: автоматический общий сбор по расписанию Celery Beat (UTC).
+    scheduled_pipeline_enabled: bool = False
+    scheduled_pipeline_interval_seconds: int = Field(default=1800, gt=0)
+    # Платный автоматический AI запрещён до появления контроллера расходов.
+    scheduled_paid_ai_enabled: bool = False
     log_level: str = "INFO"
 
 
