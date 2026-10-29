@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from app.core.config import Settings
 from app.pipeline.analysis import AnalysisStats
 from app.pipeline.lock import PipelineLockBusy
@@ -32,6 +35,20 @@ def _settings(**overrides) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def test_source_limit_accepts_positive_and_none():
+    """Лимит на источник опционален: None — обычное production-поведение."""
+    assert Settings(scheduled_pipeline_source_limit=None).scheduled_pipeline_source_limit is None
+    assert Settings().scheduled_pipeline_source_limit is None
+    assert Settings(scheduled_pipeline_source_limit=10).scheduled_pipeline_source_limit == 10
+    assert Settings(scheduled_pipeline_source_limit=1).scheduled_pipeline_source_limit == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, -10])
+def test_source_limit_rejects_non_positive(value):
+    with pytest.raises(ValidationError):
+        Settings(scheduled_pipeline_source_limit=value)
 
 
 def _result(**overrides) -> SharedPipelineResult:
@@ -128,8 +145,8 @@ def test_task_runs_shared_pipeline_once_and_returns_json(monkeypatch):
 
     payload = tasks.run_scheduled_pipeline_task()
 
-    # По умолчанию флаг платного AI включён и передаётся задачей как есть.
-    assert calls == [{"trigger": "schedule", "allow_paid_ai": True}]
+    # По умолчанию флаг платного AI включён, лимит на источник не задан.
+    assert calls == [{"trigger": "schedule", "allow_paid_ai": True, "limit": None}]
     encoded = json.dumps(payload)
     assert len(encoded) < 2000
     assert payload["status"] == "completed"
@@ -154,9 +171,27 @@ def test_task_forwards_paid_ai_opt_out(monkeypatch):
 
     payload = tasks.run_scheduled_pipeline_task()
 
-    assert calls == [{"trigger": "schedule", "allow_paid_ai": False}]
+    assert calls == [{"trigger": "schedule", "allow_paid_ai": False, "limit": None}]
     assert payload["ai"] is None
     assert payload["ai_skipped_reason"] == "paid_ai_disabled"
+
+
+def test_task_forwards_source_limit(monkeypatch):
+    """Настроенный per-source лимит доходит до run_shared_pipeline как limit."""
+    calls: list[dict] = []
+
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return _result()
+
+    monkeypatch.setattr(tasks, "run_shared_pipeline", fake_run)
+    monkeypatch.setattr(
+        tasks, "get_settings", lambda: _settings(scheduled_pipeline_source_limit=10)
+    )
+
+    tasks.run_scheduled_pipeline_task()
+
+    assert calls == [{"trigger": "schedule", "allow_paid_ai": True, "limit": 10}]
 
 
 def test_task_wrapper_is_synchronous_and_uses_asyncio_run(monkeypatch):

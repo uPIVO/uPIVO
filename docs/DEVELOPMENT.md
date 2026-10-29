@@ -128,7 +128,14 @@ backlog, а не первые 50 единиц: `ai_limit` остаётся те�
 | --- | --- | --- |
 | `SCHEDULED_PIPELINE_ENABLED` | `false` | Явный переключатель запуска расписания Beat |
 | `SCHEDULED_PIPELINE_INTERVAL_SECONDS` | `1800` | Интервал в секундах, UTC |
+| `SCHEDULED_PIPELINE_SOURCE_LIMIT` | не задано (`None`) | Необязательный операционный лимит публикаций **на источник** в сборе/нормализации scheduled-прохода; не `ai_limit` и не бюджет |
 | `SCHEDULED_PAID_AI_ENABLED` | `true` | Полный автоматический AI; `false` — только бесплатные стадии, без AI и постановки Relevance |
+
+`SCHEDULED_PIPELINE_SOURCE_LIMIT` действует только на сбор: он передаётся как
+`limit` в `run_shared_pipeline`, а не в `run_common_analysis`. `None` (по
+умолчанию) сохраняет обычное production-поведение (лимиты платформ/коннекторов).
+Значение должно быть положительным целым; пустое значение в `.env` не задают —
+удалите строку целиком.
 
 При `SCHEDULED_PIPELINE_ENABLED=false` расписание пустое: Beat ничего не ставит,
 ручной CLI и персональные relevance-задачи работают как раньше. Значение
@@ -186,6 +193,31 @@ PostgreSQL (`pg_try_advisory_lock` с фиксированным простра�
 пишется отдельно, ошибки перечислены в `failed_sources` результата задачи, а
 накопленный backlog обрабатывается следующим проходом. Ошибки AI/Redis видны
 отдельно в счётчиках `ai`/`queue_*`.
+
+### Проверка расписания на живом стенде
+
+Планировщик проверяется только реальным Beat: он должен сам инициировать
+`pipeline.run_scheduled` через Redis, а Worker — выполнить проход на реальных
+PostgreSQL/Redis и провайдерах. Прямой вызов `run_shared_pipeline` или ручной CLI
+подменяют планировщик и не являются проверкой Beat. Для ограниченного прогона
+используйте `SCHEDULED_PIPELINE_INTERVAL_SECONDS` (укороченный интервал) и
+`SCHEDULED_PIPELINE_SOURCE_LIMIT` (например, `10`), а после первой due-постановки
+свой Beat останавливайте, чтобы получился ровно один проход.
+
+### Реальный PostgreSQL для advisory lock
+
+Регресс порядка `execution_options`/`detach` unit-stub ловит не полностью:
+проверка на живом сервере выполняется env-gated тестом одноразовой БД
+(production не используется):
+
+```bash
+ITD84_TEST_DATABASE_URL='postgresql+psycopg://...' uv run pytest tests/test_pipeline_lock_postgres.py
+```
+
+Без переменной тесты пропускаются. Они проверяют запрет `execution_options` после
+`detach` (именно этот `AttributeError` из SQLAlchemy 2.0 ломал реальный запуск),
+конкуренцию, освобождение lock, отсутствие соединений в пуле и физическое
+закрытие после сбоя чтения pid.
 
 ### Наблюдаемость
 

@@ -117,14 +117,19 @@ class PostgresAdvisoryLock:
         if self._connection is not None:
             raise RuntimeError("Этот объект блокировки уже захвачен")
         connection = None
+        detached = False
         try:
             connection = self._engine.connect()
-            # ``detach`` выполняется до попытки захвата: любое исключение ниже
-            # (настройка AUTOCOMMIT, сам запрос блокировки, чтение pid) попадает
-            # в ``finally``, где выделенное соединение физически закрывается, а не
-            # возвращается в пул вместе с захваченным lock.
-            connection.detach()
+            # AUTOCOMMIT настраивается ДО detach: в SQLAlchemy 2.0
+            # ``execution_options(isolation_level=...)`` пишет finalize callback в
+            # pool-запись соединения, а после ``detach()`` её уже нет
+            # (AttributeError на реальном движке). Lock до detach не захвачен,
+            # поэтому утечки захваченного соединения в пул этот порядок не даёт.
             connection.execution_options(isolation_level="AUTOCOMMIT")
+            # detach до попытки захвата: с этого момента любой исход закрывает
+            # выделенное соединение физически, а не возвращает его в пул.
+            connection.detach()
+            detached = True
             acquired = bool(
                 connection.execute(
                     _ACQUIRE_SQL, {"classid": self._classid, "objid": self._objid}
@@ -136,11 +141,17 @@ class PostgresAdvisoryLock:
             self._connection = connection
             self._pid = int(pid) if pid is not None else None
         finally:
-            # Либо lock не удержан этим объектом, либо захват не состоялся:
-            # соединение закрывается физически и не попадёт в пул.
             if self._connection is None and connection is not None:
                 with contextlib.suppress(Exception):
-                    connection.close()
+                    if detached:
+                        # Соединение уже выведено из пула: close физически
+                        # закрывает его (в том числе после ошибок acquire/pid).
+                        connection.close()
+                    else:
+                        # Сбой до detach: invalidate помечает DBAPI-соединение
+                        # непригодным, и close не возвращает его в пул.
+                        connection.invalidate()
+                        connection.close()
         logger.info(
             "Захвачена блокировка общего прохода classid=%s objid=%s pid=%s",
             self._classid,

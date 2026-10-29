@@ -49,10 +49,15 @@ class _SAConnection:
         self._fail = fail
         self.closed = False
         self.detached = False
+        self.invalidated = False
         self.released_to_pool = False
 
     def execution_options(self, **options):
         self._log.append(("execution_options", options))
+        if self.detached:
+            # Модель реального SQLAlchemy 2.0: после detach() нет pool-записи,
+            # и isolation_level применить нельзя.
+            raise AttributeError("'NoneType' object has no attribute 'finalize_callback'")
         if self._fail == "execution_options":
             raise RuntimeError("не удалось включить AUTOCOMMIT")
         return self
@@ -78,10 +83,17 @@ class _SAConnection:
         self._log.append("detach")
         self.detached = True
 
+    def invalidate(self):
+        self._log.append("invalidate")
+        # SQLAlchemy помечает DBAPI-соединение непригодным: close не вернёт его в
+        # пул. Физическое закрытие делает close().
+        self.invalidated = True
+
     def close(self):
         self.closed = True
-        # detach означает, что close закрывает соединение, а не возвращает в пул.
-        self.released_to_pool = not self.detached
+        # detach/invalidate означают, что close закрывает соединение физически,
+        # а не возвращает его в пул.
+        self.released_to_pool = not (self.detached or self.invalidated)
         self._log.append("close")
 
 
@@ -119,17 +131,20 @@ def test_acquire_detaches_before_lock_attempt_and_keeps_connection():
 
     assert lock.acquire() is True
 
-    assert ("execution_options", {"isolation_level": "AUTOCOMMIT"}) in log
-    connection = engine.connections[0]
-    assert connection.detached is True
-    # detach выполняется до попытки захвата: соединение уже вне пула.
+    execution_at = next(
+        index for index, item in enumerate(log) if item[0] == "execution_options"
+    )
     detach_at = log.index("detach")
     lock_at = next(
         index
         for index, item in enumerate(log)
         if item[0] == "execute" and "pg_try" in item[1]
     )
-    assert detach_at < lock_at
+    # AUTOCOMMIT настраивается до detach (SQLAlchemy 2.0 требует pool-запись),
+    # detach — до попытки захвата: соединение уже вне пула.
+    assert execution_at < detach_at < lock_at
+    connection = engine.connections[0]
+    assert connection.detached is True
     # Соединение ещё живо: lock держится на нём до release.
     assert connection.closed is False
     params = next(item[2] for item in log if item[0] == "execute" and "pg_try" in item[1])
@@ -186,7 +201,8 @@ def test_lock_query_failure_closes_connection_physically():
     assert log.count("close") == 1
 
 
-def test_autocommit_configuration_failure_closes_connection_physically():
+def test_autocommit_configuration_failure_discards_connection():
+    """Сбой до detach: соединение инвалидируется и не возвращается в пул."""
     log: list[object] = []
     engine = _Engine(log, fail="execution_options")
     lock = PostgresAdvisoryLock(engine)
@@ -195,11 +211,20 @@ def test_autocommit_configuration_failure_closes_connection_physically():
         lock.acquire()
 
     connection = engine.connections[0]
-    assert connection.detached is True
+    assert connection.detached is False
+    assert connection.invalidated is True
     assert connection.closed is True
     assert connection.released_to_pool is False
     lock.release()
     assert log.count("close") == 1
+
+
+def test_stub_models_sqlalchemy_restriction_after_detach():
+    """Stub обязан запрещать execution_options после detach, как реальный движок."""
+    connection = _SAConnection([],)
+    connection.detach()
+    with pytest.raises(AttributeError, match="finalize_callback"):
+        connection.execution_options(isolation_level="AUTOCOMMIT")
 
 
 def test_verify_checks_pg_locks_for_this_backend_pid():

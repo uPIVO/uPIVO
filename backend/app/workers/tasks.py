@@ -77,6 +77,11 @@ def run_scheduled_pipeline_task() -> dict[str, Any]:
     постановка персональной оценки. Жёсткой денежной квоты нет, ``ai_limit`` не
     бюджет; учёт и контроль расходов — отдельная будущая работа.
 
+    ``SCHEDULED_PIPELINE_SOURCE_LIMIT`` передаётся как ``limit`` прохода: это
+    необязательный операционный предел публикаций на источник в сборе и
+    нормализации, а не ``ai_limit`` и не бюджет. ``None`` (по умолчанию)
+    сохраняет обычное production-поведение.
+
     ``SCHEDULED_PAID_AI_ENABLED=false`` — осознанный opt-out: бесплатные стадии
     выполняются, AI и постановка relevance пропускаются (`paid_ai_disabled`).
 
@@ -96,6 +101,7 @@ def run_scheduled_pipeline_task() -> dict[str, Any]:
         result = asyncio.run(
             run_shared_pipeline(
                 trigger="schedule",
+                limit=settings.scheduled_pipeline_source_limit,
                 allow_paid_ai=settings.scheduled_paid_ai_enabled,
             )
         )
