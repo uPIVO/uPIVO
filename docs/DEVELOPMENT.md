@@ -128,7 +128,7 @@ backlog, а не первые 50 единиц: `ai_limit` остаётся те�
 | --- | --- | --- |
 | `SCHEDULED_PIPELINE_ENABLED` | `false` | Явный переключатель запуска расписания Beat |
 | `SCHEDULED_PIPELINE_INTERVAL_SECONDS` | `1800` | Интервал в секундах, UTC |
-| `SCHEDULED_PAID_AI_ENABLED` | `true` | Полный автоматический AI; `false` — opt-out только бесплатных стадий |
+| `SCHEDULED_PAID_AI_ENABLED` | `true` | Полный автоматический AI; `false` — только бесплатные стадии, без AI и постановки Relevance |
 
 При `SCHEDULED_PIPELINE_ENABLED=false` расписание пустое: Beat ничего не ставит,
 ручной CLI и персональные relevance-задачи работают как раньше. Значение
