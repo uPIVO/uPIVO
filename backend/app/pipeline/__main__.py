@@ -6,6 +6,9 @@
     uv run python -m app.pipeline --user 1 --dry-run
     uv run python -m app.pipeline --user 1 --ai-limit 10
     uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
+
+Код возврата 3 означает ``skipped_locked``: полный общий проход уже выполняет
+другой процесс (сбор по расписанию или другой ручной запуск).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from app.connectors.youtube import DEFAULT_LIMIT
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.pipeline.analysis import DEFAULT_AI_LIMIT, AnalysisStats
+from app.pipeline.lock import PipelineLockBusy
 from app.pipeline.run import FixturePipelineResult, PipelineResult, chain_payloads, run_pipeline
 from app.services.collect import UnknownUserError
 from app.services.source_sync import SourceSyncResult
@@ -118,6 +122,10 @@ def _run_user(identifier: str, *, limit: int | None, ai_limit: int, dry_run: boo
     except UnknownUserError as exc:
         print(f"Unknown user: {exc}", file=sys.stderr)
         return 2
+    except PipelineLockBusy:
+        # Общий проход уже идёт: второй полный сбор не запускается.
+        print("skipped_locked: полный общий проход уже выполняется", file=sys.stderr)
+        return 3
     except Exception:
         logger.exception("Failed to run the publication pipeline")
         print("Failed to run the publication pipeline", file=sys.stderr)

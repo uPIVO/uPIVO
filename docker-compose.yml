@@ -53,19 +53,33 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  # Scheduled worker (ITD-84): зависит от готовности PostgreSQL, Redis и
+  # применённых миграций, иначе первый проход упадёт на отсутствующих таблицах.
   worker:
     <<: *backend
     profiles: ["workers"]
     command: ["celery", "-A", "app.workers.celery_app:celery_app", "worker", "--loglevel=INFO"]
+    restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+  # Один экземпляр Beat на расписание: не масштабируйте сервис, иначе задачи
+  # будут поставлены несколько раз.
   beat:
     <<: *backend
     profiles: ["workers"]
     command: ["celery", "-A", "app.workers.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 volumes:
   postgres-data:

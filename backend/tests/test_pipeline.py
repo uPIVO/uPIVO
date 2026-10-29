@@ -9,11 +9,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.pipeline.__main__ import main
 from app.pipeline.analysis import AnalysisStats
+from app.pipeline.lock import PipelineLockBusy
 from app.pipeline.run import PipelineResult, chain_payloads, run_pipeline
 from app.processing.normalize import NormalizeStats
 from app.services import source_sync
 from app.services.collect import UnknownUserError, UserCollectResult
 from app.services.source_sync import SourceSyncResult
+from tests.fake_run_lock import FakeRunLock
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pipeline" / "sample.json"
 
@@ -88,7 +90,9 @@ def test_empty_user_skips_collect_then_normalizes_and_clusters(monkeypatch, user
         return SourceSyncResult(source_id, "youtube", "collected")
 
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
-    result = asyncio.run(run_pipeline("empty@example.com", session_factory=users))
+    result = asyncio.run(
+        run_pipeline("empty@example.com", session_factory=users, lock=FakeRunLock())
+    )
     assert calls == []
     assert result.collect.outcomes == []
     assert order == ["normalize", "extract", "cluster", "analyze"]
@@ -111,7 +115,9 @@ def test_youtube_source_collects_then_normalizes_then_clusters(monkeypatch, user
         )
 
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
-    result = asyncio.run(run_pipeline("1", session_factory=users, limit=3, ai_limit=7))
+    result = asyncio.run(
+        run_pipeline("1", session_factory=users, limit=3, ai_limit=7, lock=FakeRunLock())
+    )
     assert calls == [10]
     assert order == ["collect", "normalize", "extract", "cluster", "analyze"]
     assert writes == [True]
@@ -131,8 +137,12 @@ def test_rerun_calls_the_same_stages_and_second_normalize_is_idle(monkeypatch, u
         )
 
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
-    first = asyncio.run(run_pipeline("one@example.com", session_factory=users))
-    second = asyncio.run(run_pipeline("one@example.com", session_factory=users))
+    first = asyncio.run(
+        run_pipeline("one@example.com", session_factory=users, lock=FakeRunLock())
+    )
+    second = asyncio.run(
+        run_pipeline("one@example.com", session_factory=users, lock=FakeRunLock())
+    )
     assert order == [
         "collect",
         "normalize",
@@ -179,7 +189,9 @@ def test_dry_run_does_not_collect_commit_or_call_ai(monkeypatch, users):
         session.rollback = tracked_rollback
         return session
 
-    result = asyncio.run(run_pipeline("one@example.com", session_factory=factory, dry_run=True))
+    result = asyncio.run(
+        run_pipeline("one@example.com", session_factory=factory, dry_run=True)
+    )
     assert calls == []
     assert order == ["normalize", "extract", "cluster"]
     assert writes == [False]
@@ -194,7 +206,9 @@ def test_dry_run_does_not_collect_commit_or_call_ai(monkeypatch, users):
 def test_unknown_user_stops_before_normalize(monkeypatch, users):
     order, _writes, _ai_limits = _patch_stages(monkeypatch)
     with pytest.raises(UnknownUserError):
-        asyncio.run(run_pipeline("missing@example.com", session_factory=users))
+        asyncio.run(
+            run_pipeline("missing@example.com", session_factory=users, lock=FakeRunLock())
+        )
     assert order == []
 
 
@@ -301,3 +315,50 @@ def test_cli_exits_non_zero_for_selected_unit_without_result(monkeypatch, capsys
     output = capsys.readouterr().out
     assert "ai_skipped=1" in output
     assert "ai_summary_failed=1" in output
+
+
+def test_busy_lock_skips_manual_run_before_collect(monkeypatch, users):
+    order, _writes, _ai_limits = _patch_stages(monkeypatch)
+    calls: list[int] = []
+
+    async def fake_sync_source(source_id, *, session_factory, limit):
+        calls.append(source_id)
+        return SourceSyncResult(source_id, "youtube", "collected")
+
+    monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
+    lock = FakeRunLock(busy=True)
+    with pytest.raises(PipelineLockBusy):
+        asyncio.run(run_pipeline("1", session_factory=users, lock=lock))
+    assert calls == []
+    assert order == []
+    assert lock.acquired == 1
+    assert lock.released == 0
+
+
+def test_manual_run_releases_lock_after_failure(monkeypatch, users):
+    _order, _writes, _ai_limits = _patch_stages(monkeypatch)
+    lock = FakeRunLock()
+    with pytest.raises(UnknownUserError):
+        asyncio.run(run_pipeline("missing@example.com", session_factory=users, lock=lock))
+    assert lock.acquired == 1
+    assert lock.released == 1
+
+
+def test_manual_dry_run_does_not_take_the_lock(monkeypatch, users):
+    _order, _writes, _ai_limits = _patch_stages(monkeypatch)
+    lock = FakeRunLock()
+    result = asyncio.run(
+        run_pipeline("one@example.com", session_factory=users, dry_run=True, lock=lock)
+    )
+    assert lock.acquired == 0
+    assert lock.released == 0
+    assert result.run_id
+
+
+def test_cli_reports_skipped_locked(monkeypatch, capsys):
+    async def fake_run(identifier, *, limit, ai_limit, dry_run):
+        raise PipelineLockBusy("skipped_locked")
+
+    monkeypatch.setattr("app.pipeline.__main__.run_pipeline", fake_run)
+    assert main(["--user", "one@example.com"]) == 3
+    assert "skipped_locked" in capsys.readouterr().err

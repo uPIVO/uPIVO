@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -58,18 +59,26 @@ class YouTubeConnector:
         *,
         limit: int | None = DEFAULT_LIMIT,
         session: Session | None = None,
+        session_factory: Callable[[], Session] | None = None,
     ) -> FetchResult:
+        """Прочитать ленту канала и публичные субтитры.
+
+        ``session_factory`` читает уже сохранённые расшифровки в отдельной
+        короткой сессии, которая закрывается до HTTP-запросов субтитров: сеть
+        не идёт внутри транзакции БД. ``session`` остаётся для вызовов без
+        фабрики (тесты и разовые сценарии).
+        """
         parsed = parse_channel_url(canonical_url)
         if limit is not None and limit < 1:
             raise InvalidSourceError("limit must be >= 1")
         if self._client is not None:
-            return self._fetch_with(self._client, parsed, limit, session)
+            return self._fetch_with(self._client, parsed, limit, session, session_factory)
         with httpx.Client(
             timeout=self._timeout,
             follow_redirects=True,
             headers=DEFAULT_HEADERS,
         ) as client:
-            return self._fetch_with(client, parsed, limit, session)
+            return self._fetch_with(client, parsed, limit, session, session_factory)
 
     def _fetch_with(
         self,
@@ -77,6 +86,7 @@ class YouTubeConnector:
         parsed: ParsedChannelUrl,
         limit: int | None,
         session: Session | None,
+        session_factory: Callable[[], Session] | None = None,
     ) -> FetchResult:
         channel_id = parsed.channel_id or self._resolve_channel_id(client, parsed.lookup_url)
         feed = self._download_rss(client, rss_url(channel_id))
@@ -88,10 +98,8 @@ class YouTubeConnector:
         ]
         if limit is not None:
             items = items[:limit]
-        stored = (
-            load_existing_transcripts(session, channel_id, [item.external_id for item in items])
-            if session is not None
-            else {}
+        stored = self._stored_transcripts(
+            channel_id, [item.external_id for item in items], session, session_factory
         )
         items = [_with_transcript(client, item, stored.get(item.external_id)) for item in items]
         return FetchResult(
@@ -100,6 +108,21 @@ class YouTubeConnector:
             canonical_url=canonical_channel_url(channel_id),
             items=items,
         )
+
+    @staticmethod
+    def _stored_transcripts(
+        channel_id: str,
+        video_ids: list[str],
+        session: Session | None,
+        session_factory: Callable[[], Session] | None,
+    ) -> dict[str, StoredTranscript]:
+        """Прочитать кэш расшифровок; фабрика закрывает чтение до HTTP."""
+        if session_factory is not None:
+            with session_factory() as cache_session:
+                return load_existing_transcripts(cache_session, channel_id, video_ids)
+        if session is not None:
+            return load_existing_transcripts(session, channel_id, video_ids)
+        return {}
 
     def _resolve_channel_id(self, client: httpx.Client, lookup_url: str) -> str:
         response = _get(client, lookup_url)

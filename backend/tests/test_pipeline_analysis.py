@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -929,3 +930,68 @@ def test_confirm_clears_receipt_only_after_successful_validation(factory):
     assert confirm(snapshot.summary_result) is True
     assert _statuses(factory) == {item_ids[0]: ProcessingStatus.PROCESSED}
     assert _snapshot(factory, "feed_item", item_ids[0]).relevance_dispatch is None
+
+
+def test_scheduled_shared_pass_reaches_real_ai_and_rerun_reuses_results(
+    monkeypatch, factory
+):
+    """Общий проход расписания доходит до настоящего AI-этапа и постановки relevance.
+
+    Провайдеры выжимки/важности и брокер заменены фейками этого файла, но
+    `run_common_analysis`, отпечатки, repository, подтверждение `processed` и
+    квитанция постановки — настоящие. Проверяется, что scheduled path не
+    ограничивает backlog (`ai_limit=None`) и повторный проход не платит заново.
+    """
+    from app.pipeline import analysis as analysis_module
+    from app.pipeline import run as pipeline_run
+    from app.pipeline.run import run_shared_pipeline
+    from tests.fake_run_lock import FakeRunLock
+
+    _source_id, item_ids = _add_items(factory, 1)
+    summarizer, importance, dispatcher = _Summarizer(), _Importance(), _Dispatcher()
+    monkeypatch.setattr(
+        analysis_module, "_default_summarization_service", lambda: summarizer
+    )
+    monkeypatch.setattr(analysis_module, "_default_importance_service", lambda: importance)
+    monkeypatch.setattr(analysis_module, "_dispatch_relevance", dispatcher)
+
+    async def no_sources(*, session_factory, limit):
+        return []
+
+    monkeypatch.setattr(pipeline_run, "sync_active_sources", no_sources)
+
+    # Шпион вокруг настоящего AI-этапа: фиксирует переданный лимит.
+    ai_limits: list[object] = []
+    real_run = analysis_module.run_common_analysis
+
+    async def spy_run(**kwargs):
+        ai_limits.append(kwargs.get("ai_limit", "отсутствует"))
+        return await real_run(**kwargs)
+
+    monkeypatch.setattr(pipeline_run, "run_common_analysis", spy_run)
+
+    first = asyncio.run(run_shared_pipeline(session_factory=factory, lock=FakeRunLock()))
+
+    assert ai_limits == [None]
+    assert first.analysis is not None
+    assert (first.analysis.selected, first.analysis.succeeded) == (1, 1)
+    assert first.analysis.queue_succeeded == 1
+    assert summarizer.calls == ["feed_item:1"]
+    assert importance.calls == ["Выжимка feed_item 1"]
+    assert dispatcher.posted == [("feed_item", 1)]
+    assert _statuses(factory) == {item_ids[0]: ProcessingStatus.PROCESSED}
+    payload = json.loads(json.dumps(first.as_dict()))
+    assert payload["ai"]["selected"] == 1
+    assert payload["ai"]["queue_succeeded"] == 1
+    assert payload["ai_skipped_reason"] is None
+
+    second = asyncio.run(run_shared_pipeline(session_factory=factory, lock=FakeRunLock()))
+
+    # Актуальные результаты и квитанция: без новых вызовов и постановок.
+    assert ai_limits == [None, None]
+    assert summarizer.calls == ["feed_item:1"]
+    assert importance.calls == ["Выжимка feed_item 1"]
+    assert dispatcher.posted == [("feed_item", 1)]
+    assert second.analysis is not None
+    assert second.analysis.selected == 0
+    assert second.analysis.queue_succeeded == 0

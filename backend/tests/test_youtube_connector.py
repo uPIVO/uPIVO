@@ -7,7 +7,7 @@ import pytest
 from app.connectors.base import FetchResult, InvalidSourceError, RawPublication, SourceFetchError
 from app.connectors.youtube import YouTubeConnector
 from app.connectors.youtube.__main__ import main
-from app.connectors.youtube.persist import persist_fetch
+from app.connectors.youtube.persist import StoredTranscript, persist_fetch
 from app.connectors.youtube.urls import parse_channel_url
 from app.models.enums import ProcessingStatus, SourceType
 from app.models.feed_item import FeedItem
@@ -230,7 +230,7 @@ def test_cli_bad_url_exits_2():
 
 
 def test_cli_network_error_exits_1(monkeypatch):
-    def boom(self, url, *, limit=None, session=None):
+    def boom(self, url, *, limit=None, session=None, session_factory=None):
         raise SourceFetchError("Network error while reading YouTube")
 
     monkeypatch.setattr(YouTubeConnector, "fetch", boom)
@@ -238,7 +238,7 @@ def test_cli_network_error_exits_1(monkeypatch):
 
 
 def test_cli_dry_run_prints_without_database(capsys, monkeypatch):
-    def fake_fetch(self, url, *, limit=None, session=None):
+    def fake_fetch(self, url, *, limit=None, session=None, session_factory=None):
         return FetchResult(
             source_name="Demo",
             source_external_id=CHANNEL_ID,
@@ -493,3 +493,73 @@ def test_persist_keeps_existing_transcript_when_incoming_has_none():
     assert existing.body_text == "already stored transcript"
     assert existing.raw_payload["transcript"] == "already stored transcript"
     assert existing.raw_payload["description"] == "rss description only"
+
+
+def test_transcript_cache_session_closes_before_caption_http(monkeypatch):
+    events: list[str] = []
+    inner = _rss_handler(list_xml=CAPTIONS_LIST, transcript_xml=CAPTIONS_EN)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in {"/api/timedtext", "/watch"}:
+            events.append("caption_http")
+        return inner(request)
+
+    class CacheSession:
+        def __enter__(self):
+            events.append("cache_open")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("cache_close")
+            return False
+
+    def fake_load(session, channel_id, video_ids):
+        events.append("cache_read")
+        return {}
+
+    monkeypatch.setattr("app.connectors.youtube.parser.load_existing_transcripts", fake_load)
+    result = YouTubeConnector(client=_client(handler)).fetch(
+        f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        limit=1,
+        session_factory=CacheSession,
+    )
+
+    assert events[:3] == ["cache_open", "cache_read", "cache_close"]
+    assert "caption_http" in events[3:]
+    assert result.items[0].raw_payload["transcript"]
+
+
+def test_session_factory_reuses_stored_transcript_without_caption_http(monkeypatch):
+    caption_calls: list[str] = []
+    inner = _rss_handler(list_xml=CAPTIONS_LIST, transcript_xml=CAPTIONS_EN)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in {"/api/timedtext", "/watch"}:
+            caption_calls.append(request.url.path)
+        return inner(request)
+
+    class CacheSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_load(session, channel_id, video_ids):
+        assert channel_id == CHANNEL_ID
+        return {
+            "8Xv5BLnXzgI": StoredTranscript(
+                text="cached transcript", lang="en", kind="manual"
+            )
+        }
+
+    monkeypatch.setattr("app.connectors.youtube.parser.load_existing_transcripts", fake_load)
+    result = YouTubeConnector(client=_client(handler)).fetch(
+        f"https://www.youtube.com/channel/{CHANNEL_ID}",
+        limit=1,
+        session_factory=CacheSession,
+    )
+
+    assert caption_calls == []
+    assert result.items[0].body_text == "cached transcript"
+    assert result.items[0].raw_payload["transcript"] == "cached transcript"

@@ -16,20 +16,27 @@ and the AI stage reuses current results.
 """
 
 from app.pipeline.analysis import AnalysisStats, run_common_analysis
+from app.pipeline.lock import PipelineLockBusy, PipelineLockLost
 from app.pipeline.run import (
     FixturePipelineResult,
     PipelineResult,
+    SharedPipelineResult,
     chain_payloads,
     run_pipeline,
+    run_shared_pipeline,
 )
 from app.services.collect import UnknownUserError
 
 __all__ = [
     "AnalysisStats",
     "FixturePipelineResult",
+    "PipelineLockBusy",
+    "PipelineLockLost",
     "PipelineResult",
+    "SharedPipelineResult",
     "UnknownUserError",
     "chain_payloads",
     "run_common_analysis",
     "run_pipeline",
+    "run_shared_pipeline",
 ]
