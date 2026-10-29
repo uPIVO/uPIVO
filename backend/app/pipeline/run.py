@@ -1,4 +1,7 @@
-"""Chain collection, normalization, and clustering. No new stage logic."""
+"""Цепочка этапов: сбор → нормализация → склейка → общий AI-анализ.
+
+Логика этапов не дублируется: AI-этап живёт в ``app.pipeline.analysis``.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from app.models.enums import ProcessingStatus
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_source import UserSource
+from app.pipeline.analysis import DEFAULT_AI_LIMIT, AnalysisStats, run_common_analysis
 from app.processing.extractors.entity_extractor import apply_extracted_entities
 from app.processing.normalize import (
     NormalizeStats,
@@ -45,6 +49,7 @@ class PipelineResult:
     clusters: list[ClusterView]
     unclustered: int
     dry_run: bool
+    analysis: AnalysisStats | None = None
 
 
 @dataclass(frozen=True)
@@ -90,21 +95,30 @@ async def run_pipeline(
     *,
     session_factory: sessionmaker[Session] | None = None,
     limit: int | None = None,
+    ai_limit: int | None = DEFAULT_AI_LIMIT,
     dry_run: bool = False,
 ) -> PipelineResult:
-    """Collect one user's enabled sources, normalize pending items, cluster stories.
+    """Собрать источники пользователя, нормализовать, склеить и запустить AI-этап.
 
-    ``dry_run`` does not fetch sources and rolls back normalization and clustering.
-    Caller does not commit; this function commits unless ``dry_run`` is set.
+    ``dry_run`` не опрашивает источники, откатывает нормализацию и склейку и не
+    вызывает AI. ``ai_limit`` ограничивает число единиц общего AI-этапа за
+    запуск; ``None`` — явный полный проход по backlog с соответствующей
+    стоимостью. Вызывающая сторона не коммитит: функция коммитит сама, кроме
+    ``dry_run``.
     """
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")
+    if ai_limit is not None and ai_limit < 1:
+        raise ValueError("ai_limit must be >= 1")
     factory = session_factory if session_factory is not None else sessionmaker(bind=get_engine())
     if dry_run:
         collected = _preview_sources(identifier, session_factory=factory)
     else:
         collected = await collect_for_user(identifier, session_factory=factory, limit=limit)
     stats, views, unclustered = _normalize_and_cluster(factory, limit=limit, dry_run=dry_run)
+    analysis = (
+        None if dry_run else await run_common_analysis(session_factory=factory, ai_limit=ai_limit)
+    )
     return PipelineResult(
         user_id=collected.user_id,
         email=collected.email,
@@ -113,6 +127,7 @@ async def run_pipeline(
         clusters=views,
         unclustered=unclustered,
         dry_run=dry_run,
+        analysis=analysis,
     )
 
 
@@ -155,10 +170,10 @@ def _normalize_and_cluster(
         stats = normalize_pending(session, limit=limit)
         _extract_entities(session)
         views, unclustered = cluster_feed(session, write=not dry_run)
-        # Hook: LLM summary of content_clusters would run here.
         if dry_run:
             session.rollback()
         else:
+            # Общий AI-этап запускается после commit вызывающей стороной.
             session.commit()
         return stats, views, unclustered
 

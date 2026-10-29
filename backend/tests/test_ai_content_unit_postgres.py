@@ -11,7 +11,7 @@ import os
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,7 +24,11 @@ from app.ai.dto import (
     RelevanceResult,
     SummaryResult,
 )
-from app.ai.importance import ImportanceService
+from app.ai.importance import (
+    IMPORTANCE_AGGREGATION_VERSION,
+    IMPORTANCE_WEIGHTS,
+    ImportanceService,
+)
 from app.ai.repository import ContentUnitAnalysisRepository, FeedItemInClusterError, SaveDisposition
 from app.ai.service import RelevanceService, SummarizationService
 from app.clustering.cluster import ClusterPlan
@@ -33,6 +37,7 @@ from app.models import (
     ClusterItem,
     ContentCluster,
     FeedItem,
+    ProcessingStatus,
     Source,
     SourceType,
     User,
@@ -422,3 +427,109 @@ def test_cluster_usecase_reuses_results_and_retries_changed_membership(engine):
         assert all(session.get(FeedItem, item_id).summary is None for item_id in ids)
         score = session.scalar(select(UserItemScore).where(UserItemScore.cluster_id == cluster_id))
         assert score.relevance_score == third.relevance.result.relevance
+
+
+def test_mark_unit_processed_requires_current_results_and_normalized_members(engine):
+    """Подтверждение `processed` под существующими блокировками состава."""
+    repo = ContentUnitAnalysisRepository()
+    with Session(engine) as session, session.begin():
+        _user, items = _seed(session)
+        cluster = ContentCluster(title="Событие")
+        session.add(cluster)
+        session.flush()
+        cluster_id = cluster.id
+        _sync_members(
+            session,
+            cluster_id,
+            ClusterPlan(
+                member_ids=tuple(item.id for item in items[:2]),
+                primary_id=items[0].id,
+                exact_ids=(),
+                title="Событие",
+            ),
+        )
+        member_ids = [item.id for item in items[:2]]
+        session.execute(
+            update(FeedItem)
+            .where(FeedItem.id.in_(member_ids))
+            .values(processing_status=ProcessingStatus.NORMALIZED)
+        )
+        snapshot = repo.load_snapshot(session, kind="cluster", unit_id=cluster_id)
+        summary = _summary()
+        importance = ImportanceResult(
+            scale_score=2,
+            significance_score=2,
+            reaction_score=1,
+            total_score=5,
+            weights=IMPORTANCE_WEIGHTS,
+            aggregation_version=IMPORTANCE_AGGREGATION_VERSION,
+            fingerprint=f"v1:{'d' * 64}",
+            provider="fake",
+            model="test",
+        )
+        assert (
+            repo.save_summary(
+                session,
+                kind="cluster",
+                unit_id=cluster_id,
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                result=summary,
+            )
+            is SaveDisposition.CURRENT
+        )
+        assert (
+            repo.save_importance(
+                session,
+                kind="cluster",
+                unit_id=cluster_id,
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+                result=importance,
+            )
+            is SaveDisposition.CURRENT
+        )
+
+        def confirm() -> bool:
+            return repo.mark_unit_processed(
+                session,
+                kind="cluster",
+                unit_id=cluster_id,
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                expected_summary=summary,
+                expected_importance=importance,
+            )
+
+        def statuses() -> set[str]:
+            rows = session.execute(
+                select(FeedItem.processing_status).where(FeedItem.id.in_(member_ids))
+            ).all()
+            return {row[0].value for row in rows}
+
+        assert confirm() is True
+        assert statuses() == {"processed"}
+
+        def write_receipt() -> bool:
+            return repo.mark_relevance_dispatched(
+                session,
+                kind="cluster",
+                unit_id=cluster_id,
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            )
+
+        assert write_receipt() is True
+        assert (
+            repo.load_snapshot(session, kind="cluster", unit_id=cluster_id).relevance_dispatch
+            is not None
+        )
+
+        session.execute(
+            update(FeedItem)
+            .where(FeedItem.id == member_ids[1])
+            .values(processing_status=ProcessingStatus.FAILED)
+        )
+        assert confirm() is False
+        rows = session.execute(
+            select(FeedItem.processing_status).where(FeedItem.id == member_ids[1])
+        ).all()
+        assert {row[0].value for row in rows} == {"failed"}

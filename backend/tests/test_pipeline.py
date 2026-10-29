@@ -8,10 +8,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.pipeline.__main__ import main
-from app.pipeline.run import chain_payloads, run_pipeline
+from app.pipeline.analysis import AnalysisStats
+from app.pipeline.run import PipelineResult, chain_payloads, run_pipeline
 from app.processing.normalize import NormalizeStats
 from app.services import source_sync
-from app.services.collect import UnknownUserError
+from app.services.collect import UnknownUserError, UserCollectResult
 from app.services.source_sync import SourceSyncResult
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pipeline" / "sample.json"
@@ -49,6 +50,7 @@ def _patch_stages(monkeypatch, *, pending: int = 2):
     order: list[str] = []
     writes: list[bool] = []
     state = {"pending": pending}
+    ai_limits: list[int | None] = []
 
     def fake_normalize(session, *, limit=None, item_id=None, now=None):
         order.append("normalize")
@@ -65,14 +67,20 @@ def _patch_stages(monkeypatch, *, pending: int = 2):
         order.append("extract")
         return 0
 
+    async def fake_analysis(*, session_factory, ai_limit):
+        order.append("analyze")
+        ai_limits.append(ai_limit)
+        return AnalysisStats()
+
     monkeypatch.setattr("app.pipeline.run.normalize_pending", fake_normalize)
     monkeypatch.setattr("app.pipeline.run._extract_entities", fake_extract)
     monkeypatch.setattr("app.pipeline.run.cluster_feed", fake_cluster)
-    return order, writes
+    monkeypatch.setattr("app.pipeline.run.run_common_analysis", fake_analysis)
+    return order, writes, ai_limits
 
 
 def test_empty_user_skips_collect_then_normalizes_and_clusters(monkeypatch, users):
-    order, writes = _patch_stages(monkeypatch, pending=0)
+    order, writes, ai_limits = _patch_stages(monkeypatch, pending=0)
     calls: list[int] = []
 
     async def fake_sync_source(source_id, *, session_factory, limit):
@@ -83,13 +91,15 @@ def test_empty_user_skips_collect_then_normalizes_and_clusters(monkeypatch, user
     result = asyncio.run(run_pipeline("empty@example.com", session_factory=users))
     assert calls == []
     assert result.collect.outcomes == []
-    assert order == ["normalize", "extract", "cluster"]
+    assert order == ["normalize", "extract", "cluster", "analyze"]
     assert writes == [True]
+    assert ai_limits == [50]
     assert result.normalize.processed == 0
+    assert result.analysis == AnalysisStats()
 
 
 def test_youtube_source_collects_then_normalizes_then_clusters(monkeypatch, users):
-    order, writes = _patch_stages(monkeypatch)
+    order, writes, ai_limits = _patch_stages(monkeypatch)
     calls: list[int] = []
 
     async def fake_sync_source(source_id, *, session_factory, limit):
@@ -101,17 +111,18 @@ def test_youtube_source_collects_then_normalizes_then_clusters(monkeypatch, user
         )
 
     monkeypatch.setattr(source_sync, "sync_source", fake_sync_source)
-    result = asyncio.run(run_pipeline("1", session_factory=users, limit=3))
+    result = asyncio.run(run_pipeline("1", session_factory=users, limit=3, ai_limit=7))
     assert calls == [10]
-    assert order == ["collect", "normalize", "extract", "cluster"]
+    assert order == ["collect", "normalize", "extract", "cluster", "analyze"]
     assert writes == [True]
+    assert ai_limits == [7]
     assert result.collect.outcomes[0].source_type == "youtube"
     assert result.collect.collected == 1
     assert result.normalize.processed == 2
 
 
 def test_rerun_calls_the_same_stages_and_second_normalize_is_idle(monkeypatch, users):
-    order, writes = _patch_stages(monkeypatch, pending=2)
+    order, writes, _ai_limits = _patch_stages(monkeypatch, pending=2)
 
     async def fake_sync_source(source_id, *, session_factory, limit):
         order.append("collect")
@@ -123,8 +134,16 @@ def test_rerun_calls_the_same_stages_and_second_normalize_is_idle(monkeypatch, u
     first = asyncio.run(run_pipeline("one@example.com", session_factory=users))
     second = asyncio.run(run_pipeline("one@example.com", session_factory=users))
     assert order == [
-        "collect", "normalize", "extract", "cluster",
-        "collect", "normalize", "extract", "cluster",
+        "collect",
+        "normalize",
+        "extract",
+        "cluster",
+        "analyze",
+        "collect",
+        "normalize",
+        "extract",
+        "cluster",
+        "analyze",
     ]
     assert writes == [True, True]
     assert first.normalize.processed == 2
@@ -132,8 +151,8 @@ def test_rerun_calls_the_same_stages_and_second_normalize_is_idle(monkeypatch, u
     assert second.collect.outcomes[0].updated == 2
 
 
-def test_dry_run_does_not_collect_or_commit(monkeypatch, users):
-    order, writes = _patch_stages(monkeypatch)
+def test_dry_run_does_not_collect_commit_or_call_ai(monkeypatch, users):
+    order, writes, ai_limits = _patch_stages(monkeypatch)
     events: list[str] = []
     calls: list[int] = []
 
@@ -164,6 +183,8 @@ def test_dry_run_does_not_collect_or_commit(monkeypatch, users):
     assert calls == []
     assert order == ["normalize", "extract", "cluster"]
     assert writes == [False]
+    assert ai_limits == []
+    assert result.analysis is None
     assert result.collect.outcomes[0].reason == "dry-run"
     assert result.collect.outcomes[0].source_type == "youtube"
     assert "commit" not in events
@@ -171,7 +192,7 @@ def test_dry_run_does_not_collect_or_commit(monkeypatch, users):
 
 
 def test_unknown_user_stops_before_normalize(monkeypatch, users):
-    order, _writes = _patch_stages(monkeypatch)
+    order, _writes, _ai_limits = _patch_stages(monkeypatch)
     with pytest.raises(UnknownUserError):
         asyncio.run(run_pipeline("missing@example.com", session_factory=users))
     assert order == []
@@ -202,7 +223,7 @@ def test_cli_fixture_prints_cluster(capsys):
 
 
 def test_cli_unknown_user_exits_2(monkeypatch, capsys):
-    async def fake_run(identifier, *, limit, dry_run):
+    async def fake_run(identifier, *, limit, ai_limit, dry_run):
         raise UnknownUserError(identifier)
 
     monkeypatch.setattr("app.pipeline.__main__.run_pipeline", fake_run)
@@ -222,3 +243,61 @@ def test_cli_rejects_user_with_fixture(capsys):
 
 def test_cli_rejects_non_positive_limit():
     assert main(["--user", "1", "--limit", "0"]) == 2
+
+
+def test_cli_rejects_non_positive_ai_limit():
+    assert main(["--user", "1", "--ai-limit", "0"]) == 2
+
+
+def test_cli_reports_ai_and_queue_failures(monkeypatch, capsys):
+    stats = AnalysisStats(
+        selected=2,
+        succeeded=1,
+        failed=1,
+        summary_failed=1,
+        queue_failed=1,
+        receipt_failed=1,
+    )
+
+    async def fake_run(identifier, *, limit, ai_limit, dry_run):
+        assert ai_limit == 5
+        return PipelineResult(
+            user_id=1,
+            email=identifier,
+            collect=UserCollectResult(user_id=1, email=identifier, outcomes=[]),
+            normalize=NormalizeStats(processed=0, failed=0, skipped=0),
+            clusters=[],
+            unclustered=0,
+            dry_run=dry_run,
+            analysis=stats,
+        )
+
+    monkeypatch.setattr("app.pipeline.__main__.run_pipeline", fake_run)
+    assert main(["--user", "one@example.com", "--ai-limit", "5"]) == 1
+    output = capsys.readouterr().out
+    assert "ai_selected=2" in output
+    assert "ai_failed=1" in output
+    assert "queue_failed=1" in output
+    assert "receipt_failed=1" in output
+
+
+def test_cli_exits_non_zero_for_selected_unit_without_result(monkeypatch, capsys):
+    stats = AnalysisStats(selected=1, skipped=1, failed=1, summary_failed=1)
+
+    async def fake_run(identifier, *, limit, ai_limit, dry_run):
+        return PipelineResult(
+            user_id=1,
+            email=identifier,
+            collect=UserCollectResult(user_id=1, email=identifier, outcomes=[]),
+            normalize=NormalizeStats(processed=0, failed=0, skipped=0),
+            clusters=[],
+            unclustered=0,
+            dry_run=dry_run,
+            analysis=stats,
+        )
+
+    monkeypatch.setattr("app.pipeline.__main__.run_pipeline", fake_run)
+    assert main(["--user", "one@example.com"]) == 1
+    output = capsys.readouterr().out
+    assert "ai_skipped=1" in output
+    assert "ai_summary_failed=1" in output

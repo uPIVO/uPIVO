@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.ai.analysis_metadata import (
     FeedItemAIMetadata,
     ImportanceResultHistory,
+    RelevanceDispatchReceipt,
     RelevanceResultHistory,
     StaleImportanceCandidate,
     StaleRelevanceCandidate,
@@ -179,3 +180,40 @@ def test_relevance_metadata_keeps_only_fingerprints_not_raw_interests() -> None:
         UserItemScoreAIMetadata.model_validate({**stored, "interests": interests})
     with pytest.raises(ValidationError):
         UserItemScoreAIMetadata.model_validate({**stored, "schema_version": 1})
+
+
+def test_relevance_dispatch_receipt_is_optional_and_additive() -> None:
+    legacy = FeedItemAIMetadata(
+        summary=SummaryResultHistory(
+            last_good=StoredSummaryResult(
+                status="current",
+                input_fingerprint=f"input-v1:{'b' * 64}",
+                result=_summary_result(),
+            )
+        )
+    ).model_dump(mode="json", exclude_none=True)
+    assert "relevance_dispatch" not in legacy
+    assert FeedItemAIMetadata.model_validate(legacy).relevance_dispatch is None
+
+    lineage = summary_lineage_fingerprint(_summary_result())
+    metadata = FeedItemAIMetadata(
+        relevance_dispatch=RelevanceDispatchReceipt(
+            input_fingerprint=f"input-v1:{'b' * 64}",
+            summary_lineage_fingerprint=lineage,
+        )
+    )
+    restored = FeedItemAIMetadata.model_validate(
+        metadata.model_dump(mode="json", exclude_none=True)
+    )
+
+    assert restored.relevance_dispatch is not None
+    assert restored.relevance_dispatch.summary_lineage_fingerprint == lineage
+    assert restored == metadata
+
+
+def test_relevance_dispatch_receipt_rejects_foreign_fingerprint_formats() -> None:
+    with pytest.raises(ValidationError):
+        RelevanceDispatchReceipt(
+            input_fingerprint="input",
+            summary_lineage_fingerprint="summary-lineage-v1:bad",
+        )

@@ -675,3 +675,53 @@ def test_importance_cli_never_overwrites_summary_input(
     assert not adapter.calls
     assert summary_path.read_bytes() == original_summary
     assert SUMMARY not in output.err
+
+
+class _ModeledAdapter(_FakeAdapter):
+    """Адаптер с моделью в отпечатке: смена модели меняет актуальность."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__()
+        self.model = model
+
+    def fingerprint_for(self, value: ImportanceInput) -> str:
+        seed = f"{self.model}:{value.summary}".encode()
+        return f"v1:{hashlib.sha256(seed).hexdigest()}"
+
+
+def test_requires_provider_call_shares_the_reuse_predicate() -> None:
+    adapter = _FakeAdapter()
+    service = importance.ImportanceService(adapter)
+    value = _input()
+    current = _run(service.score_importance(value)).result
+    old = current.model_copy(
+        update={
+            "weights": ImportanceWeights(scale=0.5, significance=1.0, reaction=1.0),
+            "aggregation_version": "content-importance-weighted-v1",
+        }
+    )
+
+    assert service.requires_provider_call(value, prior_result=current) is False
+    assert service.requires_provider_call(_input("Другая выжимка"), prior_result=current) is True
+    assert service.requires_provider_call(value, prior_result=current, force=True) is True
+    assert service.requires_provider_call(value) is True
+    assert service.requires_provider_call(value, prior_result=old) is True
+    assert service.requires_provider_call({"summary": "  "}, prior_result=current) is True
+    assert service.requires_provider_call(value, prior_result={"summary": None}) is True
+
+    reused = _run(service.score_importance(value, prior_result=current))
+
+    assert reused.reused is True
+    assert len(adapter.calls) == 1
+
+
+def test_requires_provider_call_detects_model_change_only() -> None:
+    first = _ModeledAdapter("model-a")
+    service = importance.ImportanceService(first)
+    value = _input()
+    current = _run(service.score_importance(value)).result
+    first.model = "model-b"
+
+    assert service.requires_provider_call(value, prior_result=current) is True
+    assert _run(service.score_importance(value, prior_result=current)).reused is False
+    assert len(first.calls) == 2

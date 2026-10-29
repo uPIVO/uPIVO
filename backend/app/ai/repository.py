@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, load_only
 
 from app.ai.analysis_metadata import (
     FeedItemAIMetadata,
     ImportanceResultHistory,
+    RelevanceDispatchReceipt,
     RelevanceResultHistory,
     StaleImportanceCandidate,
     StaleRelevanceCandidate,
@@ -31,6 +32,7 @@ from app.ai.dto import (
 )
 from app.ai.importance import IMPORTANCE_AGGREGATION_VERSION, IMPORTANCE_WEIGHTS
 from app.models.content_cluster import ClusterItem, ContentCluster
+from app.models.enums import ProcessingStatus
 from app.models.feed_item import FeedItem
 from app.models.source import Source
 from app.models.user_item_score import UserItemScore
@@ -62,6 +64,7 @@ class ContentUnitAnalysisSnapshot:
     input_fingerprint: str
     summary_result: SummaryResult | None
     importance_result: ImportanceResult | None
+    relevance_dispatch: RelevanceDispatchReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +388,120 @@ class ContentUnitAnalysisRepository:
             session.flush()
         return changed
 
+    def mark_unit_processed(
+        self,
+        session: Session,
+        *,
+        kind: str,
+        unit_id: int,
+        expected_input_fingerprint: str,
+        expected_summary: SummaryResult,
+        expected_importance: ImportanceResult,
+    ) -> bool:
+        """Перевести участников единицы в `processed`, если её результаты актуальны.
+
+        Вызывается после успешных операций summary и importance. Проверка идёт
+        под существующими блокировками `_load_unit(lock=True)`: текущий состав,
+        отпечаток входа, актуальные summary/importance совпадают с результатами
+        этого запуска, а все участники нормализованы. Если публикация успела
+        стать участником кластера или результаты изменились, статусы и квитанция
+        не меняются и возвращается False.
+
+        Успешное подтверждение атомарно очищает квитанцию `relevance_dispatch` до
+        commit, даже если все участники уже `processed`: выбранная единица будет
+        отправлена после этого commit, значит постановка снова ожидает квитанции.
+        Так сбой брокера после пересчёта важности без изменения входа/выжимки не
+        теряет повторную постановку.
+        """
+        self._target_id(kind, unit_id, None)
+        loaded = self._load_unit(session, kind, unit_id, lock=True)
+        if loaded is None:
+            return False
+        summary = self._current_summary(loaded)
+        importance = self._current_importance(loaded, summary)
+        if (
+            loaded.containing_cluster_id is not None
+            or loaded.input_fingerprint != expected_input_fingerprint
+            or summary is None
+            or summary_lineage_fingerprint(summary)
+            != summary_lineage_fingerprint(expected_summary)
+            or importance is None
+            or importance.fingerprint != expected_importance.fingerprint
+            or importance.total_score != expected_importance.total_score
+        ):
+            return False
+
+        member_ids = [publication.feed_item_id for publication in loaded.unit.feed_items]
+        statuses = dict(
+            session.execute(
+                select(FeedItem.id, FeedItem.processing_status)
+                .where(FeedItem.id.in_(member_ids))
+                .order_by(FeedItem.id)
+                .with_for_update()
+            ).all()
+        )
+        if len(statuses) != len(member_ids) or any(
+            status not in (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
+            for status in statuses.values()
+        ):
+            return False
+
+        pending = [
+            item_id for item_id, status in statuses.items() if status != ProcessingStatus.PROCESSED
+        ]
+        if loaded.metadata.relevance_dispatch is not None:
+            self._write_feed_metadata(
+                loaded.row, loaded.metadata.model_copy(update={"relevance_dispatch": None})
+            )
+        if pending:
+            session.execute(
+                update(FeedItem)
+                .where(FeedItem.id.in_(pending))
+                .values(processing_status=ProcessingStatus.PROCESSED)
+            )
+        session.flush()
+        return True
+
+    def mark_relevance_dispatched(
+        self,
+        session: Session,
+        *,
+        kind: str,
+        unit_id: int,
+        expected_input_fingerprint: str,
+        expected_summary_lineage_fingerprint: str,
+    ) -> bool:
+        """Записать квитанцию успешной постановки персональной оценки.
+
+        Вызывается после успешного `.delay()` в отдельной короткой транзакции и
+        повторно проверяет текущий вход и выжимку. Квитанция привязана к отпечатку
+        входа и происхождению summary: после изменения текста, состава или выжимки
+        она не совпадает, и следующий запуск снова ставит задачу. Это не outbox и
+        не гарантия доставки: сбой между постановкой и записью квитанции даёт
+        повторную постановку.
+        """
+        self._target_id(kind, unit_id, None)
+        loaded = self._load_unit(session, kind, unit_id, lock=True)
+        if loaded is None:
+            return False
+        summary = self._current_summary(loaded)
+        if (
+            loaded.containing_cluster_id is not None
+            or loaded.input_fingerprint != expected_input_fingerprint
+            or summary is None
+            or summary_lineage_fingerprint(summary) != expected_summary_lineage_fingerprint
+        ):
+            return False
+        receipt = RelevanceDispatchReceipt(
+            input_fingerprint=loaded.input_fingerprint,
+            summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
+        )
+        self._write_feed_metadata(
+            loaded.row, loaded.metadata.model_copy(update={"relevance_dispatch": receipt})
+        )
+        session.flush()
+        return True
+
     def _load_unit(
         self, session: Session, kind: str, unit_id: int, *, lock: bool
     ) -> _LoadedUnit | None:
@@ -519,6 +636,7 @@ class ContentUnitAnalysisRepository:
             input_fingerprint=loaded.input_fingerprint,
             summary_result=summary,
             importance_result=importance,
+            relevance_dispatch=loaded.metadata.relevance_dispatch,
         )
 
     @staticmethod

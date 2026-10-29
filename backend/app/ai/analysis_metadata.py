@@ -61,12 +61,29 @@ class ImportanceResultHistory(BaseModel):
     stale_candidate: StaleImportanceCandidate | None = None
 
 
+class RelevanceDispatchReceipt(BaseModel):
+    """Квитанция успешной постановки персональной оценки в брокер.
+
+    Привязана к входу единицы и к происхождению выжимки: после изменения текста,
+    состава или выжимки старая квитанция не совпадает, и следующий запуск снова
+    ставит задачу. Квитанция подтверждает только факт принятия сообщения
+    брокером, а не доставку или выполнение оценки.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_fingerprint: str = Field(pattern=_INPUT_FINGERPRINT)
+    summary_lineage_fingerprint: str = Field(pattern=_SUMMARY_LINEAGE_FINGERPRINT)
+
+
 class FeedItemAIMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: Literal[2] = 2
     summary: SummaryResultHistory = Field(default_factory=SummaryResultHistory)
     importance: ImportanceResultHistory = Field(default_factory=ImportanceResultHistory)
+    # Добавлено аддитивно: метаданные без поля читаются как отсутствие квитанции.
+    relevance_dispatch: RelevanceDispatchReceipt | None = None
 
 
 class StoredRelevanceResult(BaseModel):
