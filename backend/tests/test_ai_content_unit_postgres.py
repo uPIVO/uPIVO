@@ -508,6 +508,21 @@ def test_mark_unit_processed_requires_current_results_and_normalized_members(eng
         assert confirm() is True
         assert statuses() == {"processed"}
 
+        def write_receipt() -> bool:
+            return repo.mark_relevance_dispatched(
+                session,
+                kind="cluster",
+                unit_id=cluster_id,
+                expected_input_fingerprint=snapshot.input_fingerprint,
+                expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+            )
+
+        assert write_receipt() is True
+        assert (
+            repo.load_snapshot(session, kind="cluster", unit_id=cluster_id).relevance_dispatch
+            is not None
+        )
+
         session.execute(
             update(FeedItem)
             .where(FeedItem.id == member_ids[1])

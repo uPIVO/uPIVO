@@ -98,12 +98,13 @@ async def run_pipeline(
     ai_limit: int | None = DEFAULT_AI_LIMIT,
     dry_run: bool = False,
 ) -> PipelineResult:
-    """Collect one user's enabled sources, normalize, cluster and analyze.
+    """Собрать источники пользователя, нормализовать, склеить и запустить AI-этап.
 
-    ``dry_run`` does not fetch sources, rolls back normalization and clustering
-    and never calls AI. ``ai_limit`` bounds common AI units per run; ``None``
-    means an explicit full pass over the backlog and costs accordingly.
-    Caller does not commit; this function commits unless ``dry_run`` is set.
+    ``dry_run`` не опрашивает источники, откатывает нормализацию и склейку и не
+    вызывает AI. ``ai_limit`` ограничивает число единиц общего AI-этапа за
+    запуск; ``None`` — явный полный проход по backlog с соответствующей
+    стоимостью. Вызывающая сторона не коммитит: функция коммитит сама, кроме
+    ``dry_run``.
     """
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")

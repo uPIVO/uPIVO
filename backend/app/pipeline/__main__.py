@@ -1,6 +1,6 @@
-"""CLI: collect, normalize, cluster and run the common AI stage for one user.
+"""CLI: сбор, нормализация, склейка и общий AI-этап для одного пользователя.
 
-Usage (from backend/, PostgreSQL up, migrations applied):
+Запуск из ``backend/`` при поднятой PostgreSQL и применённых миграциях:
 
     uv run python -m app.pipeline --user demo@example.com
     uv run python -m app.pipeline --user 1 --dry-run
@@ -31,39 +31,42 @@ from app.services.source_sync import SourceSyncResult
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run collection, normalization, clustering and the common AI stage for "
-            "one user. Sources must already be enabled. The AI stage calls paid "
-            "providers and posts personal relevance tasks to the broker."
+            "Сбор, нормализация, склейка и общий AI-этап для одного пользователя. "
+            "Источники должны быть уже включены. AI-этап вызывает платные "
+            "провайдеры и ставит задачи персональной оценки в брокер."
         )
     )
     parser.add_argument(
         "--user",
-        help="users.id or users.email with enabled sources",
+        help="users.id или users.email с включёнными источниками",
     )
     parser.add_argument(
         "--fixture",
         type=Path,
-        help="JSON payload or list of payloads; normalize then cluster without a database",
+        help="JSON-объект или список объектов: нормализация и склейка без базы",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help=f"Max items per source and max pending rows (YouTube default {DEFAULT_LIMIT})",
+        help=(
+            "Максимум публикаций на источник и pending-строк "
+            f"(по умолчанию для YouTube {DEFAULT_LIMIT})"
+        ),
     )
     parser.add_argument(
         "--ai-limit",
         type=int,
         default=DEFAULT_AI_LIMIT,
         help=(
-            "Max content units for the common AI stage per run "
-            f"({DEFAULT_AI_LIMIT} by default); independently of --limit"
+            "Максимум единиц общего AI-этапа за запуск "
+            f"(по умолчанию {DEFAULT_AI_LIMIT}); не связан с --limit"
         ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Do not fetch sources, write stages or call AI",
+        help="Не опрашивать источники, не писать этапы и не вызывать AI",
     )
     args = parser.parse_args(argv)
     configure_logging(get_settings().log_level)
@@ -72,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         print("limit must be >= 1", file=sys.stderr)
         return 2
     if args.ai_limit < 1:
-        print("ai-limit must be >= 1", file=sys.stderr)
+        print("ai-limit: ожидается положительное число", file=sys.stderr)
         return 2
     if args.user is None and args.fixture is None:
         print("Pass --user or --fixture", file=sys.stderr)
@@ -156,7 +159,8 @@ def _format_analysis(stats: AnalysisStats) -> str:
         f"ai_reused={stats.reused} ai_failed={stats.failed} ai_skipped={stats.skipped} "
         f"ai_summary_failed={stats.summary_failed} "
         f"ai_importance_failed={stats.importance_failed} "
-        f"queue_succeeded={stats.queue_succeeded} queue_failed={stats.queue_failed}"
+        f"queue_succeeded={stats.queue_succeeded} queue_failed={stats.queue_failed} "
+        f"receipt_failed={stats.receipt_failed}"
     )
 
 

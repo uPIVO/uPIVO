@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, load_only
 from app.ai.analysis_metadata import (
     FeedItemAIMetadata,
     ImportanceResultHistory,
+    RelevanceDispatchReceipt,
     RelevanceResultHistory,
     StaleImportanceCandidate,
     StaleRelevanceCandidate,
@@ -63,6 +64,7 @@ class ContentUnitAnalysisSnapshot:
     input_fingerprint: str
     summary_result: SummaryResult | None
     importance_result: ImportanceResult | None
+    relevance_dispatch: RelevanceDispatchReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +453,46 @@ class ContentUnitAnalysisRepository:
         session.flush()
         return True
 
+    def mark_relevance_dispatched(
+        self,
+        session: Session,
+        *,
+        kind: str,
+        unit_id: int,
+        expected_input_fingerprint: str,
+        expected_summary_lineage_fingerprint: str,
+    ) -> bool:
+        """Записать квитанцию успешной постановки персональной оценки.
+
+        Вызывается после успешного `.delay()` в отдельной короткой транзакции и
+        повторно проверяет текущий вход и выжимку. Квитанция привязана к отпечатку
+        входа и происхождению summary: после изменения текста, состава или выжимки
+        она не совпадает, и следующий запуск снова ставит задачу. Это не outbox и
+        не гарантия доставки: сбой между постановкой и записью квитанции даёт
+        повторную постановку.
+        """
+        self._target_id(kind, unit_id, None)
+        loaded = self._load_unit(session, kind, unit_id, lock=True)
+        if loaded is None:
+            return False
+        summary = self._current_summary(loaded)
+        if (
+            loaded.containing_cluster_id is not None
+            or loaded.input_fingerprint != expected_input_fingerprint
+            or summary is None
+            or summary_lineage_fingerprint(summary) != expected_summary_lineage_fingerprint
+        ):
+            return False
+        receipt = RelevanceDispatchReceipt(
+            input_fingerprint=loaded.input_fingerprint,
+            summary_lineage_fingerprint=expected_summary_lineage_fingerprint,
+        )
+        self._write_feed_metadata(
+            loaded.row, loaded.metadata.model_copy(update={"relevance_dispatch": receipt})
+        )
+        session.flush()
+        return True
+
     def _load_unit(
         self, session: Session, kind: str, unit_id: int, *, lock: bool
     ) -> _LoadedUnit | None:
@@ -585,6 +627,7 @@ class ContentUnitAnalysisRepository:
             input_fingerprint=loaded.input_fingerprint,
             summary_result=summary,
             importance_result=importance,
+            relevance_dispatch=loaded.metadata.relevance_dispatch,
         )
 
     @staticmethod

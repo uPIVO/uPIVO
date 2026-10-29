@@ -33,8 +33,9 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.ai.analysis_metadata import summary_lineage_fingerprint
 from app.ai.base import LLMError
-from app.ai.dto import ImportanceResult, SummaryResult
+from app.ai.dto import ImportanceInput, ImportanceResult, SummaryResult
 from app.ai.importance import ImportanceService
 from app.ai.repository import (
     ContentUnitAnalysisRepository,
@@ -70,7 +71,7 @@ class AnalysisStats:
     ``failed`` считает единицы, которые не дошли до ``processed``;
     ``summary_failed`` и ``importance_failed`` уточняют стадию. ``queue_*``
     относится только к постановке в брокер и не означает готовую персональную
-    оценку.
+    оценку; ``receipt_failed`` — сообщение принято, но квитанция не записана.
     """
 
     selected: int = 0
@@ -82,6 +83,7 @@ class AnalysisStats:
     importance_failed: int = 0
     queue_succeeded: int = 0
     queue_failed: int = 0
+    receipt_failed: int = 0
 
     @property
     def has_failures(self) -> bool:
@@ -121,6 +123,7 @@ class _Counters:
     importance_failed: int = 0
     queue_succeeded: int = 0
     queue_failed: int = 0
+    receipt_failed: int = 0
 
     def build(self) -> AnalysisStats:
         return AnalysisStats(**asdict(self))
@@ -160,6 +163,7 @@ async def run_common_analysis(
         session_factory=session_factory,
         repository=analysis_repository,
         summarization=summarization,
+        importance=importance,
         limit=ai_limit,
     )
     counters = _Counters(selected=len(units), skipped=invalid)
@@ -177,7 +181,8 @@ async def run_common_analysis(
     stats = counters.build()
     logger.info(
         "AI-этап: selected=%s succeeded=%s reused=%s failed=%s skipped=%s "
-        "summary_failed=%s importance_failed=%s queue_succeeded=%s queue_failed=%s",
+        "summary_failed=%s importance_failed=%s queue_succeeded=%s queue_failed=%s "
+        "receipt_failed=%s",
         stats.selected,
         stats.succeeded,
         stats.reused,
@@ -187,6 +192,7 @@ async def run_common_analysis(
         stats.importance_failed,
         stats.queue_succeeded,
         stats.queue_failed,
+        stats.receipt_failed,
     )
     return stats
 
@@ -196,12 +202,15 @@ def _select_units(
     session_factory: SessionFactory,
     repository: ContentUnitAnalysisRepository,
     summarization: SummarizationService,
+    importance: ImportanceService,
     limit: int | None,
 ) -> tuple[list[_SelectedUnit], int]:
     """Детерминированно отобрать единицы, которые требуют работы.
 
-    Готовые единицы (актуальные summary и importance, все участники
-    ``processed``) не попадают в выборку и не занимают лимит.
+    Единица нужна, если требуется анализ (нет актуальных результатов или
+    сменилась конфигурация провайдера), не все участники ``processed`` или нет
+    актуальной квитанции постановки. Готовые единицы с актуальной квитанцией не
+    попадают в выборку и не занимают лимит.
     """
     selected: list[_SelectedUnit] = []
     invalid = 0
@@ -221,8 +230,8 @@ def _select_units(
             if snapshot is None:
                 invalid += 1
                 continue
-            needs_analysis = _needs_analysis(snapshot, summarization)
-            if not needs_analysis and not candidate.needs_finalize:
+            needs_analysis = _needs_analysis(snapshot, summarization, importance)
+            if not (needs_analysis or candidate.needs_finalize or _needs_dispatch(snapshot)):
                 continue
             selected.append(
                 _SelectedUnit(
@@ -279,17 +288,37 @@ def _iter_candidates(session: Session) -> Iterator[_Candidate]:
 
 
 def _needs_analysis(
-    snapshot: ContentUnitAnalysisSnapshot, summarization: SummarizationService
+    snapshot: ContentUnitAnalysisSnapshot,
+    summarization: SummarizationService,
+    importance: ImportanceService,
 ) -> bool:
     """Нужен ли единице общий анализ по штатным правилам переиспользования.
 
-    Актуальность подтверждают снимок репозитория и отпечаток провайдера, а не
-    только ``processing_status`` или непустая выжимка.
+    Актуальность подтверждают снимок репозитория и отпечатки обоих провайдеров, а
+    не только ``processing_status`` или непустая выжимка. Вход важности строится
+    из текущей выжимки тем же контрактом, что использует use case.
     """
-    if snapshot.summary_result is None or snapshot.importance_result is None:
+    summary = snapshot.summary_result
+    if summary is None or snapshot.importance_result is None:
         return True
-    return summarization.requires_provider_call(
-        snapshot.unit, prior_result=snapshot.summary_result, force=False
+    if summarization.requires_provider_call(snapshot.unit, prior_result=summary, force=False):
+        return True
+    return importance.requires_provider_call(
+        ImportanceInput(summary=summary.summary),
+        prior_result=snapshot.importance_result,
+        force=False,
+    )
+
+
+def _needs_dispatch(snapshot: ContentUnitAnalysisSnapshot) -> bool:
+    """Нужна ли повторная постановка: квитанции нет или она устарела."""
+    receipt = snapshot.relevance_dispatch
+    summary = snapshot.summary_result
+    if receipt is None or summary is None:
+        return True
+    return (
+        receipt.input_fingerprint != snapshot.input_fingerprint
+        or receipt.summary_lineage_fingerprint != summary_lineage_fingerprint(summary)
     )
 
 
@@ -338,11 +367,25 @@ async def _process_unit(
         _log_unit(unit, "нет актуальных результатов", AnalysisStatus.FAILED)
         return
 
+    # 1. Подтверждение `processed` и commit — до постановки в брокер.
+    marked = _confirm_processed(
+        unit,
+        summary=summary,
+        importance=importance_result,
+        session_factory=session_factory,
+        repository=repository,
+    )
+    if not marked:
+        counters.failed += 1
+        _log_unit(unit, "изменилась до подтверждения", AnalysisStatus.STALE_CANDIDATE)
+        return
+
+    # 2. Ровно одна постановка на единицу.
     try:
         dispatch(unit.kind, unit.unit_id)
     except Exception:
-        # Ошибка постановки видна отдельно и не отменяет сохранённые результаты:
-        # статус не подтверждается, следующий запуск повторит постановку.
+        # Результаты и `processed` остаются; квитанции нет, поэтому следующий
+        # запуск повторит только постановку без платных вызовов.
         counters.failed += 1
         counters.queue_failed += 1
         logger.warning(
@@ -353,27 +396,72 @@ async def _process_unit(
         return
     counters.queue_succeeded += 1
 
-    try:
-        with session_factory() as session:
-            with session.begin():
-                marked = repository.mark_unit_processed(
-                    session,
-                    kind=unit.kind,
-                    unit_id=unit.unit_id,
-                    expected_input_fingerprint=unit.input_fingerprint,
-                    expected_summary=summary,
-                    expected_importance=importance_result,
-                )
-    except (ValueError, SQLAlchemyError):
-        marked = False
-    if not marked:
+    # 3. Квитанция успешной постановки в отдельной короткой транзакции.
+    receipted = _record_receipt(
+        unit,
+        summary=summary,
+        session_factory=session_factory,
+        repository=repository,
+    )
+    if not receipted:
         counters.failed += 1
-        _log_unit(unit, "изменилась до подтверждения", AnalysisStatus.STALE_CANDIDATE)
+        counters.receipt_failed += 1
+        logger.warning(
+            "AI-этап: квитанция постановки не записана kind=%s unit_id=%s",
+            unit.kind,
+            unit.unit_id,
+        )
         return
 
     counters.succeeded += 1
     if reused:
         counters.reused += 1
+
+
+def _confirm_processed(
+    unit: _SelectedUnit,
+    *,
+    summary: SummaryResult,
+    importance: ImportanceResult,
+    session_factory: SessionFactory,
+    repository: ContentUnitAnalysisRepository,
+) -> bool:
+    """Атомарно подтвердить `processed`, если результаты всё ещё актуальны."""
+    try:
+        with session_factory() as session:
+            with session.begin():
+                return repository.mark_unit_processed(
+                    session,
+                    kind=unit.kind,
+                    unit_id=unit.unit_id,
+                    expected_input_fingerprint=unit.input_fingerprint,
+                    expected_summary=summary,
+                    expected_importance=importance,
+                )
+    except (ValueError, SQLAlchemyError):
+        return False
+
+
+def _record_receipt(
+    unit: _SelectedUnit,
+    *,
+    summary: SummaryResult,
+    session_factory: SessionFactory,
+    repository: ContentUnitAnalysisRepository,
+) -> bool:
+    """Записать квитанцию постановки; ошибка оставляет единицу повторяемой."""
+    try:
+        with session_factory() as session:
+            with session.begin():
+                return repository.mark_relevance_dispatched(
+                    session,
+                    kind=unit.kind,
+                    unit_id=unit.unit_id,
+                    expected_input_fingerprint=unit.input_fingerprint,
+                    expected_summary_lineage_fingerprint=summary_lineage_fingerprint(summary),
+                )
+    except (ValueError, SQLAlchemyError):
+        return False
 
 
 async def _request_step(
@@ -394,8 +482,11 @@ async def _request_step(
     if step is not None and step.status is AnalysisStatus.CURRENT:
         return step
     if step is None or step.status in (AnalysisStatus.NOT_FOUND, AnalysisStatus.SKIPPED):
-        counters.skipped += 1
+        # Единица уже выбрана к обработке, поэтому неподтверждённый результат
+        # считается неуспехом стадии, а не ожидаемым пропуском при отборе.
         status = step.status if step is not None else AnalysisStatus.FAILED
+        counters.skipped += 1
+        _count_failure(counters, operation)
         _log_unit(unit, "пропущена", status, operation)
         return None
     _count_failure(counters, operation)

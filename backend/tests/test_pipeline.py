@@ -256,6 +256,7 @@ def test_cli_reports_ai_and_queue_failures(monkeypatch, capsys):
         failed=1,
         summary_failed=1,
         queue_failed=1,
+        receipt_failed=1,
     )
 
     async def fake_run(identifier, *, limit, ai_limit, dry_run):
@@ -277,3 +278,26 @@ def test_cli_reports_ai_and_queue_failures(monkeypatch, capsys):
     assert "ai_selected=2" in output
     assert "ai_failed=1" in output
     assert "queue_failed=1" in output
+    assert "receipt_failed=1" in output
+
+
+def test_cli_exits_non_zero_for_selected_unit_without_result(monkeypatch, capsys):
+    stats = AnalysisStats(selected=1, skipped=1, failed=1, summary_failed=1)
+
+    async def fake_run(identifier, *, limit, ai_limit, dry_run):
+        return PipelineResult(
+            user_id=1,
+            email=identifier,
+            collect=UserCollectResult(user_id=1, email=identifier, outcomes=[]),
+            normalize=NormalizeStats(processed=0, failed=0, skipped=0),
+            clusters=[],
+            unclustered=0,
+            dry_run=dry_run,
+            analysis=stats,
+        )
+
+    monkeypatch.setattr("app.pipeline.__main__.run_pipeline", fake_run)
+    assert main(["--user", "one@example.com"]) == 1
+    output = capsys.readouterr().out
+    assert "ai_skipped=1" in output
+    assert "ai_summary_failed=1" in output
