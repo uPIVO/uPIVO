@@ -69,6 +69,38 @@ uv run pytest
 Куда класть код — см. [границы модулей](ARCHITECTURE.md). Не добавляйте новый слой,
 пока у него нет понятной задачи. Connector и extractor создаются отдельными задачами.
 
+## Celery worker локально (macOS)
+
+`start.py` поднимает только PostgreSQL и Redis через Docker (или Podman), применяет
+миграции и запускает **локальный** API через uvicorn. Worker он не запускает: обычный
+worker — отдельный процесс в другом терминале.
+
+```bash
+# из backend/, при поднятых Postgres и Redis и применённых миграциях
+uv run celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --concurrency=2
+```
+
+Пул по умолчанию (`prefork`) на нативном macOS с Python 3.12 работает: проект
+подключает совместимую инициализацию дочерних процессов (`app/workers/worker_init.py`).
+`--pool=solo` не нужен и не должен использоваться как обходной путь. Начиная с
+Celery 5.6.3 и billiard 4.3.0 macOS стартует процессы пула через `spawn`, и Celery
+включает trace-оптимизации только для перезапуска через `execv`; без обработчика
+`worker_process_init` первая же задача падала бы до своего тела с
+`ValueError: not enough values to unpack (expected 3, got 0)` в
+`celery.app.trace.fast_trace_task`. Проект вызывает штатный
+`celery.app.trace.setup_worker_optimizations` для текущего app дочернего процесса
+только при фактическом `billiard.get_start_method() == "spawn"`; при fork/forkserver
+поведение не меняется. Это локальная совместимость проекта с установленной версией
+Celery, а не утверждение об исправлении в upstream: при обновлении celery/billiard
+проверьте, нужен ли обработчик. С `--pool=solo` задачи выполняются в процессе
+родителя и эта инициализация не участвует.
+
+API в Docker и локальный API не смешивайте: у контейнера свой `DATABASE_URL`
+(`postgres:5432` внутри compose) и свой рабочий каталог, а локальный uvicorn и
+worker работают с `.env` текущего checkout. Запускайте либо compose-профиль API,
+либо локальный `python start.py`; worker подключайте к тому же Redis/PostgreSQL,
+что и API, с которым вы его используете.
+
 ## Парсер YouTube
 
 Сбор сырых видео с публичного канала через RSS (feedparser, без API-ключа).
