@@ -1,9 +1,10 @@
-"""CLI: collect, normalize, and cluster publications for one user.
+"""CLI: collect, normalize, cluster and run the common AI stage for one user.
 
 Usage (from backend/, PostgreSQL up, migrations applied):
 
     uv run python -m app.pipeline --user demo@example.com
     uv run python -m app.pipeline --user 1 --dry-run
+    uv run python -m app.pipeline --user 1 --ai-limit 10
     uv run python -m app.pipeline --fixture tests/fixtures/pipeline/sample.json
 """
 
@@ -21,6 +22,7 @@ from app.clustering.cluster import format_report
 from app.connectors.youtube import DEFAULT_LIMIT
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.pipeline.analysis import DEFAULT_AI_LIMIT, AnalysisStats
 from app.pipeline.run import FixturePipelineResult, PipelineResult, chain_payloads, run_pipeline
 from app.services.collect import UnknownUserError
 from app.services.source_sync import SourceSyncResult
@@ -29,8 +31,9 @@ from app.services.source_sync import SourceSyncResult
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run collection, normalization, and clustering for one user. "
-            "Sources must already be enabled. Does not summarize or rank."
+            "Run collection, normalization, clustering and the common AI stage for "
+            "one user. Sources must already be enabled. The AI stage calls paid "
+            "providers and posts personal relevance tasks to the broker."
         )
     )
     parser.add_argument(
@@ -49,15 +52,27 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Max items per source and max pending rows (YouTube default {DEFAULT_LIMIT})",
     )
     parser.add_argument(
+        "--ai-limit",
+        type=int,
+        default=DEFAULT_AI_LIMIT,
+        help=(
+            "Max content units for the common AI stage per run "
+            f"({DEFAULT_AI_LIMIT} by default); independently of --limit"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Do not fetch sources and do not write normalization or clusters",
+        help="Do not fetch sources, write stages or call AI",
     )
     args = parser.parse_args(argv)
     configure_logging(get_settings().log_level)
 
     if args.limit is not None and args.limit < 1:
         print("limit must be >= 1", file=sys.stderr)
+        return 2
+    if args.ai_limit < 1:
+        print("ai-limit must be >= 1", file=sys.stderr)
         return 2
     if args.user is None and args.fixture is None:
         print("Pass --user or --fixture", file=sys.stderr)
@@ -68,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fixture is not None:
         return _run_fixture(args.fixture, limit=args.limit, dry_run=args.dry_run)
-    return _run_user(args.user, limit=args.limit, dry_run=args.dry_run)
+    return _run_user(args.user, limit=args.limit, ai_limit=args.ai_limit, dry_run=args.dry_run)
 
 
 def _run_fixture(path: Path, *, limit: int | None, dry_run: bool) -> int:
@@ -91,10 +106,12 @@ def _run_fixture(path: Path, *, limit: int | None, dry_run: bool) -> int:
     return 0
 
 
-def _run_user(identifier: str, *, limit: int | None, dry_run: bool) -> int:
+def _run_user(identifier: str, *, limit: int | None, ai_limit: int, dry_run: bool) -> int:
     logger = logging.getLogger("app.pipeline")
     try:
-        result = asyncio.run(run_pipeline(identifier, limit=limit, dry_run=dry_run))
+        result = asyncio.run(
+            run_pipeline(identifier, limit=limit, ai_limit=ai_limit, dry_run=dry_run)
+        )
     except UnknownUserError as exc:
         print(f"Unknown user: {exc}", file=sys.stderr)
         return 2
@@ -103,7 +120,9 @@ def _run_user(identifier: str, *, limit: int | None, dry_run: bool) -> int:
         print("Failed to run the publication pipeline", file=sys.stderr)
         return 1
     _print_result(result)
-    return 1 if result.collect.failed else 0
+    if result.collect.failed:
+        return 1
+    return 1 if result.analysis is not None and result.analysis.has_failures else 0
 
 
 def _print_result(result: PipelineResult) -> None:
@@ -126,6 +145,18 @@ def _print_result(result: PipelineResult) -> None:
             unclustered=result.unclustered,
             dry_run=result.dry_run,
         )
+    )
+    if result.analysis is not None:
+        print(_format_analysis(result.analysis))
+
+
+def _format_analysis(stats: AnalysisStats) -> str:
+    return (
+        f"ai_selected={stats.selected} ai_succeeded={stats.succeeded} "
+        f"ai_reused={stats.reused} ai_failed={stats.failed} ai_skipped={stats.skipped} "
+        f"ai_summary_failed={stats.summary_failed} "
+        f"ai_importance_failed={stats.importance_failed} "
+        f"queue_succeeded={stats.queue_succeeded} queue_failed={stats.queue_failed}"
     )
 
 
