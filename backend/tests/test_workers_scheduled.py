@@ -11,6 +11,7 @@ import asyncio
 import json
 
 from app.core.config import Settings
+from app.pipeline.analysis import AnalysisStats
 from app.pipeline.lock import PipelineLockBusy
 from app.pipeline.run import SharedPipelineResult
 from app.processing.normalize import NormalizeStats
@@ -27,7 +28,7 @@ def _settings(**overrides) -> Settings:
     values = {
         "scheduled_pipeline_enabled": True,
         "scheduled_pipeline_interval_seconds": 1800,
-        "scheduled_paid_ai_enabled": False,
+        "scheduled_paid_ai_enabled": True,
     }
     values.update(overrides)
     return Settings(**values)
@@ -41,15 +42,20 @@ def _result(**overrides) -> SharedPipelineResult:
         "normalize": NormalizeStats(processed=2, failed=0, skipped=0),
         "clusters": [],
         "unclustered": 2,
-        "analysis": None,
-        "analysis_skip_reason": "paid_ai_disabled",
+        "analysis": AnalysisStats(selected=2, succeeded=2, queue_succeeded=2),
+        "analysis_skip_reason": None,
         "duration_seconds": 1.23456,
     }
     values.update(overrides)
     return SharedPipelineResult(**values)
 
 
-def test_beat_schedule_is_empty_by_default():
+def test_schedule_defaults_are_off_with_paid_ai_on():
+    defaults = Settings()
+    # Расписание — явный переключатель запуска, полный auto AI разрешён.
+    assert defaults.scheduled_pipeline_enabled is False
+    assert defaults.scheduled_paid_ai_enabled is True
+    assert defaults.scheduled_pipeline_interval_seconds == 1800
     assert build_beat_schedule(Settings(scheduled_pipeline_enabled=False)) == {}
     assert celery_app.conf.beat_schedule == build_beat_schedule()
 
@@ -122,31 +128,35 @@ def test_task_runs_shared_pipeline_once_and_returns_json(monkeypatch):
 
     payload = tasks.run_scheduled_pipeline_task()
 
-    assert calls == [{"trigger": "schedule", "allow_paid_ai": False}]
+    # По умолчанию флаг платного AI включён и передаётся задачей как есть.
+    assert calls == [{"trigger": "schedule", "allow_paid_ai": True}]
     encoded = json.dumps(payload)
     assert len(encoded) < 2000
     assert payload["status"] == "completed"
     assert payload["sources"]["collected"] == 1
-    assert payload["ai"] is None
-    assert payload["ai_skipped_reason"] == "paid_ai_disabled"
+    assert payload["ai"]["selected"] == 2
+    assert payload["ai"]["queue_succeeded"] == 2
+    assert payload["ai_skipped_reason"] is None
     assert payload["duration_seconds"] == 1.235
 
 
-def test_task_passes_paid_flag_through_without_unlocking_ai(monkeypatch):
+def test_task_forwards_paid_ai_opt_out(monkeypatch):
     calls: list[dict] = []
 
     async def fake_run(**kwargs):
         calls.append(kwargs)
-        return _result(analysis_skip_reason="budget_controller_unavailable")
+        return _result(analysis=None, analysis_skip_reason="paid_ai_disabled")
 
     monkeypatch.setattr(tasks, "run_shared_pipeline", fake_run)
-    monkeypatch.setattr(tasks, "get_settings", lambda: _settings(scheduled_paid_ai_enabled=True))
+    monkeypatch.setattr(
+        tasks, "get_settings", lambda: _settings(scheduled_paid_ai_enabled=False)
+    )
 
     payload = tasks.run_scheduled_pipeline_task()
 
-    assert calls == [{"trigger": "schedule", "allow_paid_ai": True}]
+    assert calls == [{"trigger": "schedule", "allow_paid_ai": False}]
     assert payload["ai"] is None
-    assert payload["ai_skipped_reason"] == "budget_controller_unavailable"
+    assert payload["ai_skipped_reason"] == "paid_ai_disabled"
 
 
 def test_task_wrapper_is_synchronous_and_uses_asyncio_run(monkeypatch):

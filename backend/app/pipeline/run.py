@@ -55,9 +55,8 @@ from app.services.source_sync import SourceSyncResult, sync_active_sources
 
 logger = logging.getLogger(__name__)
 
-# Причины пропуска платного AI в безопасном режиме (ITD-84, раздел 4.1).
+# Причина пропуска AI при явном opt-out автоматического платного этапа.
 SKIP_PAID_AI_DISABLED = "paid_ai_disabled"
-SKIP_BUDGET_CONTROLLER_UNAVAILABLE = "budget_controller_unavailable"
 
 
 @dataclass
@@ -278,7 +277,7 @@ async def run_shared_pipeline(
     trigger: str = "schedule",
     session_factory: sessionmaker[Session] | None = None,
     limit: int | None = None,
-    allow_paid_ai: bool = False,
+    allow_paid_ai: bool = True,
     lock: RunLock | None = None,
 ) -> SharedPipelineResult:
     """Один общий проход: все активные источники, затем общие стадии конвейера.
@@ -288,11 +287,15 @@ async def run_shared_pipeline(
     раз, независимо от числа пользователей. Ошибка одного источника не
     прерывает остальные.
 
-    Платный автоматический AI в безопасном режиме не запускается (ITD-84,
-    раздел 4.1): Summary/Importance/Relevance остаются отключёнными до появления
-    проверенного контроллера расходов. ``allow_paid_ai`` не открывает плату —
-    он лишь уточняет явную причину пропуска. Дешёвые стадии при этом выполняются
-    полностью.
+    По текущему решению продукта (2026-10-29) полный автоматический AI разрешён
+    без контроллера расходов: автоматический проход вызывает существующий
+    ``run_common_analysis`` с ``ai_limit=None`` — это весь накопившийся backlog,
+    а не скрытые 50 единиц — и его штатную асинхронную постановку персональной
+    оценки с квитанциями. Жёсткой денежной квоты нет; ``ai_limit`` остаётся
+    техническим пределом, а не бюджетом. Учёт и контроль расходов — отдельная
+    будущая работа. ``allow_paid_ai=False`` — осознанный opt-out: выполняются
+    только бесплатные стадии, AI и постановка relevance не запускаются, причина
+    пропуска — ``paid_ai_disabled``.
     """
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")
@@ -303,7 +306,9 @@ async def run_shared_pipeline(
         logger.info("Общий проход пропущен: skipped_locked run_id=%s trigger=%s", run_id, trigger)
         raise PipelineLockBusy(f"skipped_locked: полный общий проход уже выполняется ({run_id})")
     started = time.monotonic()
-    logger.info("Запущен общий проход: run_id=%s trigger=%s", run_id, trigger)
+    logger.info(
+        "Запущен общий проход: run_id=%s trigger=%s paid_ai=%s", run_id, trigger, allow_paid_ai
+    )
     try:
         outcomes = await run_with_lock_watchdog(
             run_lock, sync_active_sources(session_factory=factory, limit=limit)
@@ -311,12 +316,10 @@ async def run_shared_pipeline(
         stages = await _run_global_stages(
             session_factory=factory,
             limit=limit,
-            ai_limit=DEFAULT_AI_LIMIT,
+            ai_limit=None,
             dry_run=False,
-            run_analysis=False,
-            analysis_skip_reason=(
-                SKIP_BUDGET_CONTROLLER_UNAVAILABLE if allow_paid_ai else SKIP_PAID_AI_DISABLED
-            ),
+            run_analysis=allow_paid_ai,
+            analysis_skip_reason=None if allow_paid_ai else SKIP_PAID_AI_DISABLED,
             lock=run_lock,
         )
     finally:

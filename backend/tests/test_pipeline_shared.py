@@ -1,7 +1,8 @@
-"""Общий проход по расписанию: порядок стадий, блокировка и безопасный AI.
+"""Общий проход по расписанию: порядок стадий, блокировка и автоматический AI.
 
 Источники, стадии конвейера и AI заменены фейками: проверяется оркестрация
-ITD-84, а не доступность внешних сервисов.
+ITD-84 (полный backlog в AI-этапе и явный opt-out), а не доступность внешних
+сервисов.
 """
 
 from __future__ import annotations
@@ -14,12 +15,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.pipeline import run as pipeline_run
+from app.pipeline.analysis import AnalysisStats
 from app.pipeline.lock import PipelineLockBusy, PipelineLockLost
-from app.pipeline.run import (
-    SKIP_BUDGET_CONTROLLER_UNAVAILABLE,
-    SKIP_PAID_AI_DISABLED,
-    run_shared_pipeline,
-)
+from app.pipeline.run import SKIP_PAID_AI_DISABLED, run_shared_pipeline
 from app.processing.normalize import NormalizeStats
 from app.services.source_sync import SourceSyncResult
 from tests.fake_run_lock import FakeRunLock
@@ -32,7 +30,9 @@ def factory():
     engine.dispose()
 
 
-def _patch_stages(monkeypatch, *, pending: int = 1, normalize_failed: int = 0):
+def _patch_stages(
+    monkeypatch, *, pending: int = 1, normalize_failed: int = 0, stats: AnalysisStats | None = None
+):
     order: list[str] = []
     ai_limits: list[int | None] = []
 
@@ -52,7 +52,7 @@ def _patch_stages(monkeypatch, *, pending: int = 1, normalize_failed: int = 0):
     async def fake_analysis(*, session_factory, ai_limit):
         order.append("analyze")
         ai_limits.append(ai_limit)
-        return pipeline_run.AnalysisStats()
+        return stats if stats is not None else AnalysisStats()
 
     monkeypatch.setattr(pipeline_run, "normalize_pending", fake_normalize)
     monkeypatch.setattr(pipeline_run, "_extract_entities", fake_extract)
@@ -73,7 +73,7 @@ def _patch_sync(monkeypatch, order: list[str], outcomes: list[SourceSyncResult])
     return calls
 
 
-def test_scheduled_pass_syncs_once_then_shares_global_stages(monkeypatch, factory):
+def test_scheduled_pass_syncs_once_then_analyzes_full_backlog(monkeypatch, factory):
     order, ai_limits = _patch_stages(monkeypatch)
     calls = _patch_sync(
         monkeypatch,
@@ -84,39 +84,66 @@ def test_scheduled_pass_syncs_once_then_shares_global_stages(monkeypatch, factor
         ],
     )
     lock = FakeRunLock()
-    result = asyncio.run(
-        run_shared_pipeline(session_factory=factory, limit=5, lock=lock)
-    )
+    result = asyncio.run(run_shared_pipeline(session_factory=factory, limit=5, lock=lock))
 
     assert calls == [5]
-    assert order == ["sync", "normalize", "extract", "cluster"]
-    assert ai_limits == []
+    # По умолчанию полный автоматический AI разрешён, backlog не ограничен 50.
+    assert order == ["sync", "normalize", "extract", "cluster", "analyze"]
+    assert ai_limits == [None]
     assert result.trigger == "schedule"
-    assert result.analysis is None
-    assert result.analysis_skip_reason == SKIP_PAID_AI_DISABLED
+    assert result.analysis == AnalysisStats()
+    assert result.analysis_skip_reason is None
     assert result.normalize.processed == 1
     assert lock.acquired == 1
     assert lock.released == 1
     assert result.duration_seconds >= 0
     assert result.failed is False
+    payload = json.loads(json.dumps(result.as_dict()))
+    assert payload["ai"] == {
+        "selected": 0,
+        "succeeded": 0,
+        "reused": 0,
+        "failed": 0,
+        "skipped": 0,
+        "queue_succeeded": 0,
+        "queue_failed": 0,
+        "receipt_failed": 0,
+    }
+    assert payload["ai_skipped_reason"] is None
 
 
-def test_paid_flag_true_does_not_unlock_paid_ai(monkeypatch, factory):
+def test_paid_ai_opt_out_runs_only_free_stages(monkeypatch, factory):
     order, ai_limits = _patch_stages(monkeypatch)
     _patch_sync(monkeypatch, order, [SourceSyncResult(10, "youtube", "empty")])
     result = asyncio.run(
-        run_shared_pipeline(
-            session_factory=factory, allow_paid_ai=True, lock=FakeRunLock()
-        )
+        run_shared_pipeline(session_factory=factory, allow_paid_ai=False, lock=FakeRunLock())
     )
 
+    # Opt-out: ни AI-этапа, ни постановки relevance.
     assert order == ["sync", "normalize", "extract", "cluster"]
     assert ai_limits == []
     assert result.analysis is None
-    assert result.analysis_skip_reason == SKIP_BUDGET_CONTROLLER_UNAVAILABLE
+    assert result.analysis_skip_reason == SKIP_PAID_AI_DISABLED
     payload = result.as_dict()
     assert payload["ai"] is None
-    assert payload["ai_skipped_reason"] == SKIP_BUDGET_CONTROLLER_UNAVAILABLE
+    assert payload["ai_skipped_reason"] == SKIP_PAID_AI_DISABLED
+
+
+def test_explicit_paid_ai_reports_queue_outcomes(monkeypatch, factory):
+    stats = AnalysisStats(selected=2, succeeded=2, reused=0, queue_succeeded=2)
+    order, ai_limits = _patch_stages(monkeypatch, stats=stats)
+    _patch_sync(monkeypatch, order, [SourceSyncResult(10, "youtube", "collected")])
+
+    result = asyncio.run(
+        run_shared_pipeline(session_factory=factory, allow_paid_ai=True, lock=FakeRunLock())
+    )
+
+    assert order == ["sync", "normalize", "extract", "cluster", "analyze"]
+    assert ai_limits == [None]
+    payload = json.loads(json.dumps(result.as_dict()))
+    assert payload["ai"]["selected"] == 2
+    assert payload["ai"]["succeeded"] == 2
+    assert payload["ai"]["queue_succeeded"] == 2
 
 
 def test_partial_source_failure_keeps_other_results_and_stages(monkeypatch, factory):
@@ -133,7 +160,8 @@ def test_partial_source_failure_keeps_other_results_and_stages(monkeypatch, fact
     )
     result = asyncio.run(run_shared_pipeline(session_factory=factory, lock=FakeRunLock()))
 
-    assert order == ["sync", "normalize", "extract", "cluster"]
+    # Ошибка одного источника не отменяет остальные стадии, включая AI-этап.
+    assert order == ["sync", "normalize", "extract", "cluster", "analyze"]
     assert result.normalize.processed == 3
     assert result.failed is True
     payload = json.loads(json.dumps(result.as_dict()))
