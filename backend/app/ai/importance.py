@@ -26,6 +26,29 @@ class ImportanceService:
     def validate_configuration(self) -> None:
         self._adapter.validate_configuration()
 
+    def requires_provider_call(
+        self,
+        value: ImportanceInput | Mapping[str, Any],
+        *,
+        prior_result: ImportanceResult | Mapping[str, Any] | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Нужен ли внешний вызов по штатным правилам переиспользования.
+
+        Сравнивает отпечаток текущего адаптера и входа с сохранённым результатом,
+        а также версию агрегации и веса. Некорректные данные считаются поводом
+        для вызова: решать об ошибке будет сам `score_importance`.
+        """
+        if force or prior_result is None:
+            return True
+        try:
+            importance_input = self._as_input(value)
+            previous = ImportanceResult.model_validate(prior_result)
+            fingerprint = self._adapter.fingerprint_for(importance_input)
+        except Exception:
+            return True
+        return not self._reusable(previous, fingerprint)
+
     async def score_importance(
         self,
         value: ImportanceInput | Mapping[str, Any],
@@ -35,8 +58,7 @@ class ImportanceService:
     ) -> ImportanceRun:
         started = time.perf_counter()
         try:
-            value_payload = value.model_dump() if isinstance(value, ImportanceInput) else value
-            importance_input = ImportanceInput.model_validate(value_payload)
+            importance_input = self._as_input(value)
         except ValidationError:
             raise LLMError("Некорректные данные для оценки общей важности.") from None
 
@@ -52,13 +74,7 @@ class ImportanceService:
         except Exception:
             raise LLMError("Не удалось проверить актуальность оценки общей важности.") from None
 
-        if (
-            previous is not None
-            and not force
-            and previous.fingerprint == fingerprint
-            and previous.aggregation_version == IMPORTANCE_AGGREGATION_VERSION
-            and previous.weights == IMPORTANCE_WEIGHTS
-        ):
+        if previous is not None and not force and self._reusable(previous, fingerprint):
             return ImportanceRun(
                 result=previous,
                 reused=True,
@@ -92,4 +108,19 @@ class ImportanceService:
             result=result,
             reused=False,
             elapsed_seconds=time.perf_counter() - started,
+        )
+
+    @staticmethod
+    def _as_input(value: ImportanceInput | Mapping[str, Any]) -> ImportanceInput:
+        if isinstance(value, ImportanceInput):
+            return value
+        return ImportanceInput.model_validate(value)
+
+    @staticmethod
+    def _reusable(previous: ImportanceResult, fingerprint: str) -> bool:
+        """Один общий критерий переиспользования для вызова и его проверки."""
+        return (
+            previous.fingerprint == fingerprint
+            and previous.aggregation_version == IMPORTANCE_AGGREGATION_VERSION
+            and previous.weights == IMPORTANCE_WEIGHTS
         )

@@ -6,13 +6,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.security import require_query_user
 from app.db.session import get_db
 from app.models.enums import SourceType
 from app.schemas.feed import FeedItemDetail, PaginatedFeedResponse
 from app.services.feed import FeedService
 from app.services.users import UnknownUserError
 
-router = APIRouter(prefix="/feed", tags=["News Feed"])
+router = APIRouter(prefix="/feed", tags=["News Feed"], dependencies=[Depends(require_query_user)])
 logger = logging.getLogger(__name__)
 
 

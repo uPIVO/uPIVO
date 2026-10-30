@@ -12,7 +12,7 @@ import argparse
 import logging
 import sys
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.connectors.base import ConnectorError, InvalidSourceError, SourceFetchError
 from app.connectors.youtube.parser import DEFAULT_LIMIT, YouTubeConnector
@@ -64,7 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with Session(engine) as session:
             try:
-                fetch = YouTubeConnector().fetch(args.url, limit=args.limit, session=session)
+                fetch = YouTubeConnector().fetch(
+                    args.url,
+                    limit=args.limit,
+                    session_factory=sessionmaker(bind=engine),
+                )
             except InvalidSourceError as exc:
                 print(f"Invalid YouTube channel: {exc}", file=sys.stderr)
                 return 2

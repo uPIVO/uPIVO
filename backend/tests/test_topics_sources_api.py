@@ -1,13 +1,19 @@
 """HTTP API for per-user sources and thematic folders. No live PostgreSQL."""
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.auth.tokens import issue_token
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.main import app
+
+_USER_ID = re.compile(r"/api/users/(\d+)/")
 
 CHANNEL_URL = "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw"
 CHANNEL_ID = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
@@ -83,10 +89,51 @@ def api():
     app.dependency_overrides[get_db] = override_db
     try:
         with TestClient(app) as client:
-            yield client, factory
+            yield _AuthedClient(client), factory
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+class _AuthedClient:
+    """Sends a bearer token for the user id in /api/users/{id}/... unless one is set."""
+
+    def __init__(self, client: TestClient):
+        self.raw = client
+
+    def get(self, url: str, **kwargs):
+        kwargs["headers"] = _with_token(url, kwargs.get("headers"))
+        return self.raw.get(url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        kwargs["headers"] = _with_token(url, kwargs.get("headers"))
+        return self.raw.post(url, **kwargs)
+
+    def patch(self, url: str, **kwargs):
+        kwargs["headers"] = _with_token(url, kwargs.get("headers"))
+        return self.raw.patch(url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        kwargs["headers"] = _with_token(url, kwargs.get("headers"))
+        return self.raw.delete(url, **kwargs)
+
+
+def _token(user_id: int) -> str:
+    settings = get_settings()
+    return issue_token(
+        user_id=user_id,
+        secret=settings.auth_token_secret.get_secret_value(),
+        ttl_seconds=settings.auth_token_ttl_seconds,
+    )
+
+
+def _with_token(url: str, headers: dict | None) -> dict[str, str]:
+    merged = dict(headers or {})
+    if "Authorization" not in merged:
+        match = _USER_ID.search(url)
+        if match:
+            merged["Authorization"] = f"Bearer {_token(int(match.group(1)))}"
+    return merged
 
 
 def _add_user(factory, email: str) -> int:
@@ -104,14 +151,71 @@ def _count(factory, table: str) -> int:
         return session.scalar(text(f"SELECT count(*) FROM {table}"))
 
 
+def test_user_routes_reject_missing_or_bad_token(api):
+    client, factory = api
+    user_id = _add_user(factory, "locked@example.com")
+    sources = client.raw.get(f"/api/users/{user_id}/sources")
+    topics = client.raw.post(f"/api/users/{user_id}/topics", json={"name": "AI"})
+    bad = client.raw.get(
+        f"/api/users/{user_id}/sources",
+        headers={"Authorization": "Bearer not-a-token"},
+    )
+    assert sources.status_code == 401
+    assert sources.json() == {"detail": "Not authenticated"}
+    assert topics.status_code == 401
+    assert topics.json() == {"detail": "Not authenticated"}
+    assert bad.status_code == 401
+    assert bad.json() == {"detail": "Not authenticated"}
+    assert _count(factory, "folders") == 0
+
+
+def test_token_for_another_user_is_forbidden(api):
+    client, factory = api
+    owner = _add_user(factory, "owner@example.com")
+    other = _add_user(factory, "other@example.com")
+    headers = {"Authorization": f"Bearer {_token(other)}"}
+    sources = client.raw.get(f"/api/users/{owner}/sources", headers=headers)
+    created = client.raw.post(
+        f"/api/users/{owner}/topics",
+        json={"name": "AI"},
+        headers=headers,
+    )
+    assert sources.status_code == 403
+    assert sources.json() == {"detail": "Forbidden"}
+    assert created.status_code == 403
+    assert created.json() == {"detail": "Forbidden"}
+    assert _count(factory, "folders") == 0
+
+
+def test_login_token_reads_own_sources(api):
+    client, _factory = api
+    registered = client.raw.post(
+        "/api/auth/register",
+        json={"email": "owner@example.com", "password": "correct-horse"},
+    )
+    user_id = registered.json()["id"]
+    logged_in = client.raw.post(
+        "/api/auth/login",
+        json={"email": "owner@example.com", "password": "correct-horse"},
+    )
+    listing = client.raw.get(
+        f"/api/users/{user_id}/sources",
+        headers={"Authorization": f"Bearer {logged_in.json()['token']}"},
+    )
+    assert registered.status_code == 201
+    assert logged_in.status_code == 200
+    assert listing.status_code == 200
+    assert listing.json() == []
+
+
 def test_unknown_user(api):
     client, _factory = api
     listing = client.get("/api/users/999/sources")
     created = client.post("/api/users/999/topics", json={"name": "AI"})
-    assert listing.status_code == 404
-    assert listing.json() == {"detail": "Unknown user"}
-    assert created.status_code == 404
-    assert created.json() == {"detail": "Unknown user"}
+    assert listing.status_code == 401
+    assert listing.json() == {"detail": "Not authenticated"}
+    assert created.status_code == 401
+    assert created.json() == {"detail": "Not authenticated"}
 
 
 def test_empty_lists(api):

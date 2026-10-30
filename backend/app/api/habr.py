@@ -6,11 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.connectors.habr.client import HabrClient
+from app.core.auth import get_current_user_id
 from app.db.session import get_db
 from app.schemas.habr import FeedItemResponse, HabrPostBase, HabrSyncRequest, HabrSyncResponse
 from app.services.habr import HabrService
 
-router = APIRouter(prefix="/habr", tags=["Habr Parser"])
+router = APIRouter(
+    prefix="/habr", tags=["Habr Parser"], dependencies=[Depends(get_current_user_id)]
+)
 logger = logging.getLogger(__name__)
 
 

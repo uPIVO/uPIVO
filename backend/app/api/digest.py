@@ -6,6 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.security import check_user, require_query_user
+from app.core.auth import get_current_user_id
 from app.db.session import get_db
 from app.models.enums import DigestType
 from app.schemas.digest import (
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 )
 def generate_digest(
     request: DigestCreateRequest,
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
     db: Annotated[Session, Depends(get_db)],
 ):
     """
@@ -40,6 +43,7 @@ def generate_digest(
     - Формирует кликабельную плашку с названием за дату/время и сохраняет результат в БД.
     - Автоматически подчищает старые дайджесты старше 3 дней (кроме избранных).
     """
+    check_user(request.user_id, current_user_id)
     if request.type == DigestType.TOPIC and not (request.topic and request.topic.strip()):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -55,6 +59,7 @@ def generate_digest(
 
 @router.get(
     "",
+    dependencies=[Depends(require_query_user)],
     response_model=list[DigestListItem],
     summary="Получить список плашек дайджестов пользователя",
 )
@@ -84,6 +89,7 @@ def list_digests(
 
 @router.get(
     "/{digest_id}",
+    dependencies=[Depends(require_query_user)],
     response_model=DigestDetailResponse,
     summary="Получить развернутый дайджест при клике на плашку",
 )
@@ -112,6 +118,7 @@ def get_digest_detail(
 
 @router.patch(
     "/{digest_id}/favorite",
+    dependencies=[Depends(require_query_user)],
     response_model=DigestToggleFavoriteResponse,
     summary="Добавить дайджест в избранное / убрать из избранного",
 )

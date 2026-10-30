@@ -12,6 +12,8 @@ Print without writing to the database:
     uv run python -m app.connectors.youtube --dry-run "https://www.youtube.com/@GoogleDevelopers"
 """
 
+from collections.abc import Callable
+
 from sqlalchemy.orm import Session
 
 from app.connectors.base import FetchResult
@@ -35,13 +37,17 @@ def collect_channel(
     limit: int = DEFAULT_LIMIT,
     connector: YouTubeConnector | None = None,
     source: Source | None = None,
+    session_factory: Callable[[], Session] | None = None,
 ) -> tuple[FetchResult, PersistStats]:
-    """Fetch a channel RSS feed and upsert raw feed_items. Caller commits.
+    """Прочитать ленту канала и записать сырые feed_items. Commit — у вызывающей стороны.
 
-    Pass `source` to update that catalog row (user_sources) instead of looking
-    up or inserting another YouTube source.
+    ``source`` обновляет указанную строку каталога (user_sources) вместо поиска
+    или создания другого YouTube-источника. ``session_factory`` читает кэш
+    сохранённых расшифровок в отдельной короткой сессии: читающая транзакция
+    закрывается до HTTP-запросов субтитров, поэтому пишущая транзакция ``session``
+    не охватывает сетевые вызовы.
     """
     client = connector or YouTubeConnector()
-    fetch = client.fetch(url, limit=limit, session=session)
+    fetch = client.fetch(url, limit=limit, session=session, session_factory=session_factory)
     stats = persist_fetch(session, fetch, source=source)
     return fetch, stats

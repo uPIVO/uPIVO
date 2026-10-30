@@ -1,22 +1,25 @@
 """Service for generating personalized user news feed and detailed item view."""
 
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster
-from app.models.enums import ProcessingStatus, SourceType
+from app.models.enums import SourceType
 from app.models.feed_item import FeedItem
 from app.models.source import Source
-from app.models.user_source import UserSource
+from app.models.user_item_score import UserItemScore
 from app.schemas.feed import (
     FeedItemDetail,
     FeedItemListItem,
     PaginatedFeedResponse,
     SourceBrief,
 )
+from app.services.ranking import calculate_card_rank
 from app.services.users import require_user
+from app.services.visibility import feed_item_visible
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ class FeedService:
         2. Optional filter by source_type (e.g. habr, reddit, telegram, youtube).
         3. Optional topic/tag filter (searches title, body, summary, raw_payload tags/hubs).
         4. Group publications of the same story (ContentCluster) into a single card.
-        5. Sort by publication date descending (published_at DESC, collected_at DESC).
+        5. Rank cards by relevance (user_item_scores), importance, and freshness.
         6. Return original title/summary/source or cluster-aggregated card.
         """
         require_user(self.db, user_id)
@@ -53,21 +56,12 @@ class FeedService:
                 ClusterItem.is_primary,
                 ContentCluster.title.label("cluster_title"),
                 ContentCluster.summary.label("cluster_summary"),
+                ContentCluster.importance_score.label("cluster_importance_score"),
             )
             .join(Source, FeedItem.source_id == Source.id)
-            .join(
-                UserSource,
-                (UserSource.source_id == Source.id)
-                & (UserSource.user_id == user_id)
-                & (UserSource.enabled.is_(True)),
-            )
             .outerjoin(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
             .outerjoin(ContentCluster, ContentCluster.id == ClusterItem.cluster_id)
-            .where(
-                FeedItem.processing_status.in_(
-                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                )
-            )
+            .where(feed_item_visible(user_id))
         )
 
         if source_type:
@@ -110,6 +104,7 @@ class FeedService:
                 is_primary,
                 cluster_title,
                 cluster_summary,
+                cluster_importance,
             ) = row
 
             if cluster_id is not None:
@@ -128,6 +123,7 @@ class FeedService:
                             "cluster_id": cluster_id,
                             "cluster_title": cluster_title,
                             "cluster_summary": cluster_summary,
+                            "cluster_importance": cluster_importance,
                             "primary_item": feed_item,
                             "primary_source": source,
                             "feed_items": [(feed_item, source, bool(is_primary))],
@@ -140,11 +136,68 @@ class FeedService:
                         "cluster_id": None,
                         "cluster_title": None,
                         "cluster_summary": None,
+                        "cluster_importance": None,
                         "primary_item": feed_item,
                         "primary_source": source,
                         "feed_items": [(feed_item, source, False)],
                     }
                 )
+
+        # Load user_item_scores for candidate items and clusters
+        candidate_feed_ids = [row[0].id for row in all_matching_rows]
+        candidate_cluster_ids = [row[2] for row in all_matching_rows if row[2] is not None]
+
+        user_scores_by_feed: dict[int, float] = {}
+        user_scores_by_cluster: dict[int, float] = {}
+
+        if candidate_feed_ids or candidate_cluster_ids:
+            score_filters = []
+            if candidate_feed_ids:
+                score_filters.append(UserItemScore.feed_item_id.in_(candidate_feed_ids))
+            if candidate_cluster_ids:
+                score_filters.append(UserItemScore.cluster_id.in_(candidate_cluster_ids))
+
+            scores_query = select(UserItemScore).where(
+                UserItemScore.user_id == user_id,
+                or_(*score_filters),
+            )
+            for sc in self.db.execute(scores_query).scalars().all():
+                if sc.feed_item_id and sc.relevance_score is not None:
+                    user_scores_by_feed[sc.feed_item_id] = sc.relevance_score
+                if sc.cluster_id and sc.relevance_score is not None:
+                    user_scores_by_cluster[sc.cluster_id] = sc.relevance_score
+
+        now = datetime.now(UTC)
+
+        # Compute rank_score for each card and sort: rank_score DESC, published_at DESC, id DESC
+        for card in cards:
+            # If it's a cluster, ensure primary_item is properly resolved
+            if card["is_cluster"]:
+                for f_item, src, is_prim in card["feed_items"]:
+                    if is_prim:
+                        card["primary_item"] = f_item
+                        card["primary_source"] = src
+                        break
+
+            rank = calculate_card_rank(
+                is_cluster=card["is_cluster"],
+                cluster_id=card["cluster_id"],
+                primary_item=card["primary_item"],
+                feed_items=card["feed_items"],
+                cluster_importance=card.get("cluster_importance"),
+                user_scores_by_feed=user_scores_by_feed,
+                user_scores_by_cluster=user_scores_by_cluster,
+                now=now,
+            )
+            card["rank_score"] = rank
+
+        # Sort cards: highest rank first; break ties by publication time and ID
+        def _card_sort_key(c: dict) -> tuple:
+            p_item = c["primary_item"]
+            pub = p_item.published_at or p_item.collected_at or datetime.min
+            return (c["rank_score"], pub, p_item.id)
+
+        cards.sort(key=_card_sort_key, reverse=True)
 
         total_cards = len(cards)
         paginated_cards = cards[offset : offset + limit]
@@ -226,20 +279,9 @@ class FeedService:
         query = (
             select(FeedItem, Source, ClusterItem.cluster_id, ContentCluster)
             .join(Source, FeedItem.source_id == Source.id)
-            .join(
-                UserSource,
-                (UserSource.source_id == Source.id)
-                & (UserSource.user_id == user_id)
-                & (UserSource.enabled.is_(True)),
-            )
             .outerjoin(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
             .outerjoin(ContentCluster, ContentCluster.id == ClusterItem.cluster_id)
-            .where(
-                FeedItem.id == item_id,
-                FeedItem.processing_status.in_(
-                    (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                ),
-            )
+            .where(feed_item_visible(user_id), FeedItem.id == item_id)
         )
         row = self.db.execute(query).first()
         if not row:
@@ -272,17 +314,9 @@ class FeedService:
                 select(FeedItem, Source)
                 .join(ClusterItem, ClusterItem.feed_item_id == FeedItem.id)
                 .join(Source, FeedItem.source_id == Source.id)
-                .join(
-                    UserSource,
-                    (UserSource.source_id == Source.id)
-                    & (UserSource.user_id == user_id)
-                    & (UserSource.enabled.is_(True)),
-                )
                 .where(
                     ClusterItem.cluster_id == cluster_id,
-                    FeedItem.processing_status.in_(
-                        (ProcessingStatus.NORMALIZED, ProcessingStatus.PROCESSED)
-                    ),
+                    feed_item_visible(user_id),
                 )
                 .order_by(
                     ClusterItem.is_primary.desc(),
