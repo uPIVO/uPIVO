@@ -50,7 +50,6 @@ def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_pa
     from app.pipeline import analysis
     from app.services import user_relevance
     from app.workers.celery_app import celery_app
-    from app.workers.tasks import run_scheduled_pipeline_task
 
     with _test_database("head") as database:
         monkeypatch.setenv("DATABASE_URL", database.url)
@@ -258,10 +257,36 @@ def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_pa
                         )
                         assert feedback.status_code == 201, feedback.text
                     # Same collected data and unchanged analysis inputs reuse AI and storage.
-                    run_scheduled_pipeline_task.delay()
-                    _wait(lambda: len(completed) >= 2)
+                    # Restart the real Beat: a manual delay() does not establish that
+                    # the next scheduled tick is idempotent or survives a Beat restart.
+                    with (tmp_path / "beat-restarted.log").open("w") as output:
+                        beat = subprocess.Popen(
+                            [
+                                sys.executable,
+                                "-m",
+                                "celery",
+                                "-A",
+                                "app.workers.celery_app:celery_app",
+                                "beat",
+                                "--loglevel=INFO",
+                                f"--schedule={tmp_path / 'beat-schedule'}",
+                            ],
+                            cwd=Path(__file__).resolve().parents[1],
+                            env=os.environ.copy(),
+                            stdout=output,
+                            stderr=subprocess.STDOUT,
+                        )
+                        _wait(lambda: len(completed) >= 2)
+                        beat.terminate()
+                        beat.wait(timeout=10)
+                    assert completed[1]["status"] == "completed"
+                    assert completed[1]["sources"]["total"] == 1
+                    assert completed[1]["sources"]["inserted"] == 0
+                    assert completed[1]["ai"]["selected"] == 0
+                    assert completed[1]["ai"]["queue_succeeded"] == 0
                     assert len(details) == 3
                     assert len(summary.calls) == 2
+                    assert len(importance.calls) == 2
                     original = digest.json()
                     with Session(database.engine) as db, db.begin():
                         db.get(ContentCluster, cluster["cluster_id"]).title = "Changed cluster"
