@@ -640,7 +640,7 @@ def test_cli_prior_result_round_trip_is_database_free(
         selected_models.append(model)
         return adapter
 
-    monkeypatch.setattr(cli, "OpenRouterAdapter", make_adapter)
+    monkeypatch.setattr(cli, "create_summary_adapter", make_adapter)
 
     first_exit = cli.main(
         [str(input_path), "--save-result", str(saved_result), "--model", "summary-cli-override"]
@@ -688,7 +688,7 @@ def test_cli_failed_force_preserves_existing_result_file(
     result_path.write_text(existing_result.model_dump_json(indent=2) + "\n", encoding="utf-8")
     original_contents = result_path.read_bytes()
     failing_adapter = _FailingAdapter()
-    monkeypatch.setattr(cli, "OpenRouterAdapter", lambda settings, model=None: failing_adapter)
+    monkeypatch.setattr(cli, "create_summary_adapter", lambda settings, model=None: failing_adapter)
 
     exit_code = cli.main(
         [

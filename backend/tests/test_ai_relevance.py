@@ -489,7 +489,7 @@ def test_cli_reads_saved_summary_and_interests_without_regenerating_summary(
         selected_models.append(model)
         return adapter
 
-    monkeypatch.setattr(relevance_cli, "JevRelevanceAdapter", make_adapter)
+    monkeypatch.setattr(relevance_cli, "create_relevance_adapter", make_adapter)
     monkeypatch.setattr(relevance_cli, "get_settings", lambda: _settings())
 
     exit_code = relevance_cli.main(
@@ -538,7 +538,9 @@ def test_cli_never_overwrites_summary_input_file(
     interests_path.write_text(json.dumps(INTERESTS, ensure_ascii=False), encoding="utf-8")
     original_contents = summary_path.read_bytes()
     adapter = _FakeAdapter()
-    monkeypatch.setattr(relevance_cli, "JevRelevanceAdapter", lambda settings, model=None: adapter)
+    monkeypatch.setattr(
+        relevance_cli, "create_relevance_adapter", lambda settings, model=None: adapter
+    )
     monkeypatch.setattr(relevance_cli, "get_settings", lambda: _settings())
 
     exit_code = relevance_cli.main(
@@ -576,7 +578,9 @@ def test_cli_force_failure_preserves_prior_result_file(
     result_path.write_text(old_result.model_dump_json(indent=2) + "\n", encoding="utf-8")
     original_contents = result_path.read_bytes()
     adapter = _FakeAdapter(fail=True)
-    monkeypatch.setattr(relevance_cli, "JevRelevanceAdapter", lambda settings, model=None: adapter)
+    monkeypatch.setattr(
+        relevance_cli, "create_relevance_adapter", lambda settings, model=None: adapter
+    )
     monkeypatch.setattr(relevance_cli, "get_settings", lambda: _settings())
 
     exit_code = relevance_cli.main(

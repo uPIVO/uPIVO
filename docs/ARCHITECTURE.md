@@ -199,3 +199,15 @@ ITD-86 → ITD-85 → ITD-84 составляют зависимую цепоч�
 после исчерпания попыток задача остаётся failed, а не маскируется под success.
 Надёжный outbox, учёт просмотров и автоматический пересчёт исторической
 релевантности после изменения интересов пока не реализованы.
+
+## Выбор AI-провайдера
+
+`app/ai/factory.py` — единая точка выбора адаптеров для ручных CLI, общего
+AI-конвейера и фоновой персональной оценки. Выжимка: `LLM_PROVIDER` =
+`openrouter` (по умолчанию) / `openai`; важность и релевантность:
+`IMPORTANCE_PROVIDER` и `RELEVANCE_PROVIDER` = `typesafe` (по умолчанию) / `openai`.
+OpenAI Responses API реализует те же контракты Summary/Importance/Relevance.
+Конвейер, глобальность FeedItem/ContentCluster, personal scores и snapshots
+дайджестов остаются общими; выбор провайдера не требует миграции БД.
+Ключ `OPENAI_API_KEY` и модели задаются через env; подробности и смешанные
+конфигурации — в [инструкции AI](ai-summarization.md#gpt-через-openai-responses-api).

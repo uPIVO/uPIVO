@@ -78,9 +78,9 @@ def test_cli_emits_structured_result_without_echoing_interests(
     monkeypatch.setattr("app.ai.analyze_feed_item.FeedItemAnalysisUseCase", _FakeUseCase)
     monkeypatch.setattr("app.ai.analyze_feed_item.get_settings", lambda: object())
     monkeypatch.setattr("app.ai.analyze_feed_item.get_engine", lambda: object())
-    monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
-    monkeypatch.setattr("app.ai.analyze_feed_item.JevImportanceAdapter", _FakeAdapter)
-    monkeypatch.setattr("app.ai.analyze_feed_item.JevRelevanceAdapter", _FakeAdapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_summary_adapter", _FakeAdapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_importance_adapter", _FakeAdapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_relevance_adapter", _FakeAdapter)
     _FakeAdapter.models.clear()
 
     assert (
@@ -144,13 +144,13 @@ def test_cli_constructs_only_adapters_for_selected_operation(monkeypatch, capsys
     monkeypatch.setattr("app.ai.analyze_feed_item.FeedItemAnalysisUseCase", _FakeUseCase)
     monkeypatch.setattr("app.ai.analyze_feed_item.get_settings", lambda: object())
     monkeypatch.setattr("app.ai.analyze_feed_item.get_engine", lambda: object())
-    monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_summary_adapter", _FakeAdapter)
 
     def unexpected_adapter(*_arguments: Any, **_keywords: Any) -> None:
         raise AssertionError("Невыбранный AI-адаптер не должен создаваться")
 
-    monkeypatch.setattr("app.ai.analyze_feed_item.JevImportanceAdapter", unexpected_adapter)
-    monkeypatch.setattr("app.ai.analyze_feed_item.JevRelevanceAdapter", unexpected_adapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_importance_adapter", unexpected_adapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_relevance_adapter", unexpected_adapter)
 
     assert (
         main(
@@ -205,7 +205,7 @@ def test_cli_cluster_uses_generic_use_case_and_json_fields(monkeypatch, capsys) 
     )
     monkeypatch.setattr("app.ai.analyze_feed_item.get_settings", lambda: object())
     monkeypatch.setattr("app.ai.analyze_feed_item.get_engine", lambda: object())
-    monkeypatch.setattr("app.ai.analyze_feed_item.OpenRouterAdapter", _FakeAdapter)
+    monkeypatch.setattr("app.ai.analyze_feed_item.create_summary_adapter", _FakeAdapter)
 
     assert main(["82", "--kind", "cluster", "--operation", "summary"]) == 0
     assert _FakeUseCase.dependencies["kind"] == "cluster"

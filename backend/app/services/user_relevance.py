@@ -30,7 +30,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from app.ai.base import LLMError
-from app.ai.jev import JevRelevanceAdapter
+from app.ai.factory import create_relevance_adapter
 from app.ai.repository import FeedItemInClusterError
 from app.ai.service import RelevanceService
 from app.core.config import get_settings
@@ -475,7 +475,9 @@ def build_default_service(
 
     return UserRelevanceService(
         session_factory=session_factory,
-        relevance_service_factory=lambda: RelevanceService(JevRelevanceAdapter(get_settings())),
+        relevance_service_factory=lambda: RelevanceService(
+            create_relevance_adapter(get_settings())
+        ),
         repository=repository,
         catalog=catalog,
         scheduler=scheduler if scheduler is not None else CeleryTaskScheduler(),

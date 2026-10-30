@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from app.ai.base import LLMError
 from app.ai.dto import RelevanceResult, SummaryResult
-from app.ai.jev import JevRelevanceAdapter
+from app.ai.factory import create_relevance_adapter
 from app.ai.service import RelevanceService
 from app.core.config import get_settings
 
@@ -25,7 +25,9 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _Parser(description="Оценка релевантности готовой выжимки через Jev / TypeSafe.")
+    parser = _Parser(
+        description="Оценка релевантности готовой выжимки через выбранного провайдера."
+    )
     parser.add_argument(
         "summary_result",
         type=Path,
@@ -69,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.save_result.resolve() in protected_inputs:
                 raise LLMError("Файл оценки не должен совпадать с входным файлом.")
 
-        adapter = JevRelevanceAdapter(get_settings(), model=args.model)
+        adapter = create_relevance_adapter(get_settings(), model=args.model)
         run = asyncio.run(
             RelevanceService(adapter).score_relevance(
                 {"summary": summary_result.summary, "interests": interests},

@@ -11,9 +11,12 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.ai.base import LLMError
+from app.ai.factory import (
+    create_importance_adapter,
+    create_relevance_adapter,
+    create_summary_adapter,
+)
 from app.ai.importance import ImportanceService
-from app.ai.jev import JevImportanceAdapter, JevRelevanceAdapter
-from app.ai.openrouter import OpenRouterAdapter
 from app.ai.service import RelevanceService, SummarizationService
 from app.core.config import get_settings
 from app.db.session import get_engine
@@ -105,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interests", type=Path, help="JSON-массив интересов для релевантности")
     parser.add_argument(
         "--summary-model",
-        help="Модель OpenRouter только для summary или all",
+        help="Модель выбранного провайдера только для summary или all",
     )
     parser.add_argument(
         "--importance-model",
@@ -138,17 +141,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = get_settings()
         summarization_service = (
-            SummarizationService(OpenRouterAdapter(settings, model=args.summary_model))
+            SummarizationService(create_summary_adapter(settings, model=args.summary_model))
             if operation.includes_summary
             else None
         )
         importance_service = (
-            ImportanceService(JevImportanceAdapter(settings, model=args.importance_model))
+            ImportanceService(create_importance_adapter(settings, model=args.importance_model))
             if operation.includes_importance
             else None
         )
         relevance_service = (
-            RelevanceService(JevRelevanceAdapter(settings, model=args.relevance_model))
+            RelevanceService(create_relevance_adapter(settings, model=args.relevance_model))
             if operation.includes_relevance
             else None
         )

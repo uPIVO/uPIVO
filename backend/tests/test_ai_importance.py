@@ -542,7 +542,7 @@ def test_importance_cli_reads_saved_summary_and_saves_metadata_without_echoing_t
         selected_models.append(model)
         return adapter
 
-    monkeypatch.setattr(cli, "JevImportanceAdapter", make_adapter)
+    monkeypatch.setattr(cli, "create_importance_adapter", make_adapter)
     monkeypatch.setattr(cli, "get_settings", lambda: _settings())
 
     exit_code = cli.main(
@@ -586,7 +586,7 @@ def test_importance_cli_reuses_an_explicit_matching_prior_without_provider_call(
     prior = _run(importance.ImportanceService(_FakeAdapter()).score_importance(_input())).result
     prior_path.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
     adapter = _FakeAdapter()
-    monkeypatch.setattr(cli, "JevImportanceAdapter", lambda settings, model=None: adapter)
+    monkeypatch.setattr(cli, "create_importance_adapter", lambda settings, model=None: adapter)
     monkeypatch.setattr(cli, "get_settings", lambda: _settings())
 
     exit_code = cli.main([str(summary_path), "--prior-result", str(prior_path)])
@@ -624,7 +624,7 @@ def test_importance_cli_force_failure_preserves_prior_and_summary_files(
     original_summary = summary_path.read_bytes()
     original_result = result_path.read_bytes()
     adapter = _FakeAdapter(fail=True)
-    monkeypatch.setattr(cli, "JevImportanceAdapter", lambda settings, model=None: adapter)
+    monkeypatch.setattr(cli, "create_importance_adapter", lambda settings, model=None: adapter)
     monkeypatch.setattr(cli, "get_settings", lambda: _settings())
 
     exit_code = cli.main(
@@ -665,7 +665,7 @@ def test_importance_cli_never_overwrites_summary_input(
     )
     original_summary = summary_path.read_bytes()
     adapter = _FakeAdapter()
-    monkeypatch.setattr(cli, "JevImportanceAdapter", lambda settings, model=None: adapter)
+    monkeypatch.setattr(cli, "create_importance_adapter", lambda settings, model=None: adapter)
     monkeypatch.setattr(cli, "get_settings", lambda: _settings())
 
     exit_code = cli.main([str(summary_path), "--save-result", str(summary_path)])

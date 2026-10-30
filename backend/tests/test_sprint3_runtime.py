@@ -3,6 +3,7 @@
 Only Habr HTTP and paid AI providers are faked. Requires disposable services.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from celery.contrib.testing.worker import start_worker
 from celery.signals import task_postrun
@@ -43,7 +45,8 @@ def _wait(predicate, seconds=25):
     raise AssertionError("Timed out waiting for the real worker")
 
 
-def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider", ["legacy", "openai"])
+def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_path, provider):
     from app.pipeline import analysis
     from app.services import user_relevance
     from app.workers.celery_app import celery_app
@@ -60,9 +63,14 @@ def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_pa
         get_engine.cache_clear()
         old_broker = celery_app.conf.broker_url
         celery_app.conf.broker_url = os.environ["SPRINT3_TEST_REDIS_URL"]
+        monkeypatch.setenv("LLM_PROVIDER", "openai" if provider == "openai" else "openrouter")
+        monkeypatch.setenv("IMPORTANCE_PROVIDER", "openai" if provider == "openai" else "typesafe")
+        monkeypatch.setenv("RELEVANCE_PROVIDER", "openai" if provider == "openai" else "typesafe")
+        get_settings.cache_clear()
         summary, importance = _Summarizer(), _Importance()
-        monkeypatch.setattr(analysis, "_default_summarization_service", lambda: summary)
-        monkeypatch.setattr(analysis, "_default_importance_service", lambda: importance)
+        if provider == "legacy":
+            monkeypatch.setattr(analysis, "_default_summarization_service", lambda: summary)
+            monkeypatch.setattr(analysis, "_default_importance_service", lambda: importance)
 
         class Scoring:
             def __init__(self, *args):
@@ -82,8 +90,47 @@ def test_scheduled_pipeline_to_ranked_feed_and_frozen_digest(monkeypatch, tmp_pa
                     ),
                 )
 
-        monkeypatch.setattr(user_relevance, "RelevanceService", Scoring)
-        monkeypatch.setattr(user_relevance, "JevRelevanceAdapter", lambda _: object())
+        if provider == "legacy":
+            monkeypatch.setattr(user_relevance, "RelevanceService", Scoring)
+            monkeypatch.setattr(user_relevance, "create_relevance_adapter", lambda _: object())
+        else:
+            # Real factories, services, fingerprints, persistence and Celery dispatch;
+            # replace only OpenAI HTTP, never the provider-selection logic.
+            from tests.test_ai_openai import payload
+
+            monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+            monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4-mini")
+            get_settings.cache_clear()
+            real_client = httpx.AsyncClient
+
+            def respond(request):
+                assert str(request.url) == "https://api.openai.com/v1/responses"
+                assert request.headers["Authorization"] == "Bearer test-openai-key"
+                body = json.loads(request.content)
+                assert body["store"] is False
+                schema = body.get("text", {}).get("format", {}).get("name")
+                if schema == "importance_scores":
+                    importance.calls.append("importance")
+                    answer = json.dumps(
+                        {"scale_score": 2, "significance_score": 2, "reaction_score": 1}
+                    )
+                elif schema == "relevance_score":
+                    value = json.loads(body["input"][1]["content"])
+                    matched = ("cluster" in value["summary"]) == ("space" in value["interests"])
+                    answer = json.dumps({"relevance": 0.95 if matched else 0.05})
+                else:
+                    raw = body["input"][1]["content"]
+                    value = json.loads(raw[raw.index("{") :])
+                    summary.calls.append(value["kind"])
+                    answer = f"Выжимка {value['kind']} {value['id']}"
+                return httpx.Response(200, json=payload(answer))
+
+            monkeypatch.setattr(
+                httpx,
+                "AsyncClient",
+                lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+            )
         fetches, details, completed = [], [], []
         titles = [
             "NASA landed the Artemis crew on the Moon after a four-day flight",

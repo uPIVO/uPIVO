@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = "@preset/deep-seek-v4-flash-via-direct-deep-seek-provider"
     llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    importance_provider: str = "typesafe"
+    relevance_provider: str = "typesafe"
+    openai_api_key: SecretStr = SecretStr("")
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-5.4-mini"
+    openai_summary_model: str | None = None
+    openai_importance_model: str | None = None
+    openai_relevance_model: str | None = None
+    openai_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     typesafe_api_key: SecretStr = SecretStr("")
     typesafe_base_url: str = "https://api.typesafe.ai"
     typesafe_model: str = "jev-1.14.0"

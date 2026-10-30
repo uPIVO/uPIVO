@@ -578,3 +578,14 @@ uv run alembic check
 оценки повторяется до трёх раз, затем видна как failed в Worker.
 Перед публичным развёртыванием нужны HTTPS, rate limiting регистрации/входа,
 политика отзыва токенов и контроль расходов AI; текущая проверка их не заменяет.
+
+## Использование GPT
+
+Для всех трёх AI-операций задайте `LLM_PROVIDER=openai`,
+`IMPORTANCE_PROVIDER=openai`, `RELEVANCE_PROVIDER=openai`, `OPENAI_API_KEY`
+и `OPENAI_MODEL` в своём `.env`, затем перезапустите API/Worker/Beat.
+Можно переключить лишь одну операцию, сохранив остальные на OpenRouter/Jev.
+[Полная конфигурация и CLI](ai-summarization.md#gpt-через-openai-responses-api).
+Миграций и новых зависимостей для OpenAI нет. `test_ai_openai.py` использует
+HTTP mocks; `test_sprint3_runtime.py` проверяет оба варианта конвейера с настоящими
+PostgreSQL, Redis и Worker/Beat, подменяя только внешний HTTP OpenAI для GPT-варианта.

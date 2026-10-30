@@ -529,17 +529,17 @@ def _log_unit(
 
 
 def _default_summarization_service() -> SummarizationService:
-    from app.ai.openrouter import OpenRouterAdapter
+    from app.ai.factory import create_summary_adapter
     from app.core.config import get_settings
 
-    return SummarizationService(OpenRouterAdapter(get_settings()))
+    return SummarizationService(create_summary_adapter(get_settings()))
 
 
 def _default_importance_service() -> ImportanceService:
-    from app.ai.jev import JevImportanceAdapter
+    from app.ai.factory import create_importance_adapter
     from app.core.config import get_settings
 
-    return ImportanceService(JevImportanceAdapter(get_settings()))
+    return ImportanceService(create_importance_adapter(get_settings()))
 
 
 def _dispatch_relevance(kind: str, unit_id: int) -> Any:

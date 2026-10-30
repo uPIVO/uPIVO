@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from app.ai.base import LLMError
 from app.ai.dto import SummaryResult
-from app.ai.openrouter import OpenRouterAdapter
+from app.ai.factory import create_summary_adapter
 from app.ai.service import SummarizationService
 from app.core.config import get_settings
 
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         unit_payload = _read_json(args.input, "входной файл")
         prior_result = _read_result(args.prior_result) if args.prior_result is not None else None
-        adapter = OpenRouterAdapter(get_settings(), model=args.model)
+        adapter = create_summary_adapter(get_settings(), model=args.model)
         run = asyncio.run(
             SummarizationService(adapter).summarize(
                 unit_payload,

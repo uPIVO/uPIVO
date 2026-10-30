@@ -13,8 +13,8 @@ from pydantic import ValidationError
 
 from app.ai.base import LLMError
 from app.ai.dto import ImportanceResult, SummaryResult
+from app.ai.factory import create_importance_adapter
 from app.ai.importance import ImportanceService
-from app.ai.jev import JevImportanceAdapter
 from app.core.config import get_settings
 
 
@@ -26,7 +26,7 @@ class _Parser(argparse.ArgumentParser):
 
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(
-        description="Экспериментальная оценка общей важности готовой выжимки через Jev / TypeSafe."
+        description="Оценка общей важности готовой выжимки через выбранного провайдера."
     )
     parser.add_argument(
         "summary_result",
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.save_result.resolve() == args.summary_result.resolve():
                 raise LLMError("Файл оценки не должен совпадать с файлом результата суммаризации.")
 
-        adapter = JevImportanceAdapter(get_settings(), model=args.model)
+        adapter = create_importance_adapter(get_settings(), model=args.model)
         run = asyncio.run(
             ImportanceService(adapter).score_importance(
                 {"summary": summary_result.summary},
