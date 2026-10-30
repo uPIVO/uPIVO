@@ -14,6 +14,8 @@ from app.schemas.digest import (
     DigestCreateRequest,
     DigestDetailResponse,
     DigestListItem,
+    DigestSettingsResponse,
+    DigestSettingsUpdateRequest,
     DigestToggleFavoriteResponse,
 )
 from app.services.digest import DigestService
@@ -53,6 +55,51 @@ def generate_digest(
     service = DigestService(db)
     try:
         return service.generate_digest(request)
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
+
+
+@router.get(
+    "/settings",
+    response_model=DigestSettingsResponse,
+    summary="Получить настройки генерации дайджестов",
+)
+def get_digest_settings(
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
+    db: Annotated[Session, Depends(get_db)],
+    user_id: Annotated[int | None, Query(description="ID пользователя", ge=1)] = None,
+):
+    """
+    Возвращает настройки сбора дайджестов (период в часах и лимит инфоповодов).
+    """
+    target_user_id = user_id if user_id is not None else current_user_id
+    check_user(target_user_id, current_user_id)
+    service = DigestService(db)
+    try:
+        return service.get_settings(target_user_id)
+    except UnknownUserError as exc:
+        raise HTTPException(status_code=404, detail="Unknown user") from exc
+
+
+@router.put(
+    "/settings",
+    response_model=DigestSettingsResponse,
+    summary="Обновить настройки генерации дайджестов",
+)
+def update_digest_settings(
+    request: DigestSettingsUpdateRequest,
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
+    db: Annotated[Session, Depends(get_db)],
+    user_id: Annotated[int | None, Query(description="ID пользователя", ge=1)] = None,
+):
+    """
+    Сохраняет настройки сбора дайджестов пользователя (period_hours, max_items).
+    """
+    target_user_id = user_id if user_id is not None else current_user_id
+    check_user(target_user_id, current_user_id)
+    service = DigestService(db)
+    try:
+        return service.update_settings(target_user_id, request)
     except UnknownUserError as exc:
         raise HTTPException(status_code=404, detail="Unknown user") from exc
 

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster
 from app.models.digest import Digest, DigestItem
+from app.models.digest_setting import UserDigestSetting
 from app.models.enums import DigestType, ProcessingStatus
 from app.models.feed_item import FeedItem
 from app.models.source import Source
@@ -17,6 +18,8 @@ from app.schemas.digest import (
     DigestCreateRequest,
     DigestDetailResponse,
     DigestListItem,
+    DigestSettingsResponse,
+    DigestSettingsUpdateRequest,
 )
 from app.schemas.feed import FeedItemListItem, SourceBrief
 from app.services.ranking import calculate_card_rank
@@ -46,8 +49,16 @@ class DigestService:
         # Автоматическая очистка просроченных (> 3 дней не избранных)
         self.cleanup_expired_digests(days=3)
 
+        settings = self.get_or_create_settings(request.user_id)
+        effective_period_hours = (
+            request.period_hours if request.period_hours is not None else settings.period_hours
+        )
+        effective_max_items = (
+            request.max_items if request.max_items is not None else settings.max_items
+        )
+
         now = datetime.now(UTC).replace(tzinfo=None)
-        period_start = now - timedelta(hours=request.period_hours)
+        period_start = now - timedelta(hours=effective_period_hours)
         period_end = now
 
         # Базовый запрос публикаций пользователя за период с информацией о кластерах
@@ -244,8 +255,8 @@ class DigestService:
 
         story_cards.sort(key=_digest_card_sort_key, reverse=True)
 
-        # Ограничиваем топ материалов для одного дайджеста (топ-15 наиболее подходящих событий)
-        story_cards = story_cards[:15]
+        # Ограничиваем топ материалов для одного дайджеста согласно настройкам (по умолчанию 15)
+        story_cards = story_cards[:effective_max_items]
 
         # Преобразуем отобранные истории в FeedItemListItem
         selected_card_items: list[FeedItemListItem] = []
@@ -513,3 +524,52 @@ class DigestService:
             )
 
         return "\n\n".join(lines)
+
+    def get_or_create_settings(self, user_id: int) -> UserDigestSetting:
+        """Получить текущие настройки дайджестов пользователя или создать с дефолтными значениями."""
+        require_user(self.db, user_id)
+        settings = self.db.get(UserDigestSetting, user_id)
+        if not settings:
+            settings = UserDigestSetting(user_id=user_id, period_hours=24, max_items=15)
+            self.db.add(settings)
+            self.db.commit()
+            self.db.refresh(settings)
+        return settings
+
+    def get_settings(self, user_id: int) -> DigestSettingsResponse:
+        """Получить настройки дайджестов пользователя в виде схемы ответа."""
+        settings = self.get_or_create_settings(user_id)
+        return DigestSettingsResponse(
+            user_id=settings.user_id,
+            period_hours=settings.period_hours,
+            max_items=settings.max_items,
+            updated_at=settings.updated_at,
+        )
+
+    def update_settings(
+        self, user_id: int, request: DigestSettingsUpdateRequest
+    ) -> DigestSettingsResponse:
+        """Обновить настройки генерации дайджестов пользователя."""
+        settings = self.get_or_create_settings(user_id)
+        changed = False
+
+        if request.period_hours is not None:
+            settings.period_hours = request.period_hours
+            changed = True
+        if request.max_items is not None:
+            settings.max_items = request.max_items
+            changed = True
+
+        if changed:
+            settings.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            self.db.add(settings)
+            self.db.commit()
+            self.db.refresh(settings)
+
+        return DigestSettingsResponse(
+            user_id=settings.user_id,
+            period_hours=settings.period_hours,
+            max_items=settings.max_items,
+            updated_at=settings.updated_at,
+        )
+

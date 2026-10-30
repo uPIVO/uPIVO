@@ -2,6 +2,7 @@
 
 from app.models.content_cluster import ClusterItem, ContentCluster
 from app.models.digest import Digest, DigestItem
+from app.models.digest_setting import UserDigestSetting
 from app.models.enums import (
     DigestType,
     FavoriteTargetType,
@@ -28,6 +29,7 @@ __all__ = [
     "Digest",
     "DigestItem",
     "DigestType",
+    "UserDigestSetting",
     "Feedback",
     "FeedbackType",
     "Favorite",

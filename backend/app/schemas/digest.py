@@ -12,8 +12,33 @@ class DigestCreateRequest(BaseModel):
         default=DigestType.GENERAL, description="Тип дайджеста: general или topic"
     )
     topic: str | None = Field(default=None, description="Тема (обязательна для topic дайджеста)")
-    period_hours: int = Field(
-        default=24, ge=1, le=168, description="Период выборки новостей в часах (по умолчанию 24)"
+    period_hours: int | None = Field(
+        default=None, ge=1, le=168, description="Период выборки новостей в часах (по умолчанию из настроек пользователя или 24)"
+    )
+    max_items: int | None = Field(
+        default=None, ge=1, le=100, description="Максимальное количество инфоповодов (по умолчанию из настроек пользователя или 15)"
+    )
+
+
+class DigestSettingsResponse(BaseModel):
+    """Пользовательские настройки генерации дайджестов."""
+
+    user_id: int
+    period_hours: int = Field(ge=1, le=168, description="Период сбора новостей в часах")
+    max_items: int = Field(ge=1, le=100, description="Максимальное число инфоповодов")
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DigestSettingsUpdateRequest(BaseModel):
+    """Запрос на обновление настроек генерации дайджестов."""
+
+    period_hours: int | None = Field(
+        default=None, ge=1, le=168, description="Период сбора новостей в часах (1-168)"
+    )
+    max_items: int | None = Field(
+        default=None, ge=1, le=100, description="Максимальное количество инфоповодов (1-100)"
     )
 
 

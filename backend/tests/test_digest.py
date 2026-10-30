@@ -143,6 +143,17 @@ def sqlite_engine():
                 ")"
             )
         )
+        conn.execute(
+            text(
+                "CREATE TABLE user_digest_settings ("
+                "  user_id INTEGER PRIMARY KEY,"
+                "  period_hours INTEGER NOT NULL DEFAULT 24,"
+                "  max_items INTEGER NOT NULL DEFAULT 15,"
+                "  created_at DATETIME,"
+                "  updated_at DATETIME"
+                ")"
+            )
+        )
 
         # 1. Users
         conn.execute(
