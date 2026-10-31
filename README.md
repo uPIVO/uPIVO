@@ -12,11 +12,12 @@ Redis и Celery подготовлены; worker/beat запускаются о�
 Нужен Docker с Compose. Сначала создайте `.env` по [инструкции демостенда](docs/LOCAL_DEMO.md): задайте `POSTGRES_PASSWORD`, `AUTH_TOKEN_SECRET` и нужные ключи. Значения секретов не храните в Git.
 
 ```bash
-docker compose config --quiet
-docker compose up --build -d --wait
+python3 start_prod.py
 ```
 
-Миграции применяются автоматически. Swagger через шлюз: http://127.0.0.1:18080/upivo/docs · Health API напрямую: http://127.0.0.1:18000/health. Шлюз запускается отдельно по [инструкции демостенда](docs/LOCAL_DEMO.md).
+Скрипт запускает Docker Desktop, оба Compose-проекта и управляемый ngrok, дожидается готовности и печатает ссылки; существующий .env не меняет.
+
+Миграции применяются автоматически. Swagger через шлюз: http://127.0.0.1:18080/upivo/docs · Health API напрямую: http://127.0.0.1:18000/health. Инструкция: [локальный демостенд](docs/LOCAL_DEMO.md).
 
 Остановка: `docker compose --profile workers down` — данные БД сохраняются.
 
