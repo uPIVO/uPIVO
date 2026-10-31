@@ -16,7 +16,7 @@ docker compose config --quiet
 docker compose up --build -d --wait
 ```
 
-Миграции применяются автоматически. Swagger: http://127.0.0.1:18000/docs · Health: http://127.0.0.1:18000/health. Адреса соответствуют стандартным портам демостенда.
+Миграции применяются автоматически. Swagger через шлюз: http://127.0.0.1:18080/upivo/docs · Health API напрямую: http://127.0.0.1:18000/health. Шлюз запускается отдельно по [инструкции демостенда](docs/LOCAL_DEMO.md).
 
 Остановка: `docker compose --profile workers down` — данные БД сохраняются.
 
