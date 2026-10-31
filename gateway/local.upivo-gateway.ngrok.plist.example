@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Шаблон LaunchAgent для общего туннеля демостенда.
+  При установке замените __HOME__ абсолютным домашним каталогом, а
+  __NGROK_BIN__ — результатом `command -v ngrok`. Секретов здесь нет:
+  авторизация ngrok берётся из существующей локальной конфигурации.
+  Установленный файл: ~/Library/LaunchAgents/local.upivo-gateway.ngrok.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.upivo-gateway.ngrok</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NGROK_BIN__</string>
+        <string>http</string>
+        <string>http://127.0.0.1:18080</string>
+        <string>--inspect=false</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/upivo-gateway/ngrok.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/upivo-gateway/ngrok.log</string>
+</dict>
+</plist>
