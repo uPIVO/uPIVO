@@ -221,15 +221,28 @@ def _launchctl(*arguments):
         raise LauncherError(f"launchctl {arguments[0]} не выполнена: {result.stderr.strip()}")
 
 
+def _replace_placeholders(value, replacements):
+    if isinstance(value, str):
+        for placeholder, replacement in replacements.items():
+            value = value.replace(placeholder, replacement)
+        return value
+    if isinstance(value, list):
+        return [_replace_placeholders(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_placeholders(item, replacements) for key, item in value.items()}
+    return value
+
+
 def _render_plist(ngrok_bin):
     if not PLIST_TEMPLATE.is_file():
         raise LauncherError(f"Нет шаблона LaunchAgent: {PLIST_TEMPLATE}")
-    template = PLIST_TEMPLATE.read_text(encoding="utf-8")
-    filled = template.replace("__HOME__", str(_home())).replace("__NGROK_BIN__", str(ngrok_bin))
     try:
-        plist = plistlib.loads(filled.encode("utf-8"))
+        template = plistlib.loads(PLIST_TEMPLATE.read_bytes())
     except ValueError as exc:
         raise LauncherError(f"Шаблон LaunchAgent не разбирается: {exc}") from exc
+    # Подстановка идёт по строковым значениям разобранного plist: XML-экранирование
+    # делает plistlib при записи, поэтому символы вроде & в путях безопасны.
+    plist = _replace_placeholders(template, {"__HOME__": str(_home()), "__NGROK_BIN__": str(ngrok_bin)})
     if plist.get("Label") != NEW_LABEL:
         raise LauncherError(f"В шаблоне LaunchAgent ожидается Label {NEW_LABEL}.")
     return plist
@@ -250,6 +263,12 @@ def _write_plist(plist):
     with path.open("wb") as handle:
         plistlib.dump(plist, handle)
     return path
+
+
+def _prepare_launch_agent():
+    _log_path().parent.mkdir(parents=True, exist_ok=True)
+    # enable нужен, чтобы поднять службу, ранее выключенную через disable.
+    _launchctl("enable", f"gui/{_uid()}/{NEW_LABEL}")
 
 
 def _disable_legacy(legacy_state):
@@ -273,17 +292,22 @@ def _ensure_ngrok(desired_plist, tunnels):
     # Установленная копия сравнивается разобранным plist: комментарии шаблона не важны.
     installed = _read_plist(_plist_path())
     if installed == desired_plist:
-        if new_state is None:
+        if new_state == 0:
+            # Служба загружена без процесса (например, после disable): включаем заново.
+            _prepare_launch_agent()
+            _launchctl("bootout", f"gui/{_uid()}/{NEW_LABEL}")
+            _launchctl("bootstrap", f"gui/{_uid()}", str(_plist_path()))
+        elif new_state is None:
+            _prepare_launch_agent()
             _disable_legacy(legacy_state)
             _launchctl("bootstrap", f"gui/{_uid()}", str(_plist_path()))
-        elif new_state == 0:
-            _launchctl("kickstart", "-k", f"gui/{_uid()}/{NEW_LABEL}")
         return
     # Сначала освобождаем 4040 от старой службы, чтобы два агента не оказались живыми.
     _disable_legacy(legacy_state)
     if new_state is not None:
         _launchctl("bootout", f"gui/{_uid()}/{NEW_LABEL}")
     _write_plist(desired_plist)
+    _prepare_launch_agent()
     _launchctl("bootstrap", f"gui/{_uid()}", str(_plist_path()))
 
 
@@ -332,6 +356,11 @@ def _wait_gateway_tunnel():
                     f"Агент ngrok направляет другой upstream ({_tunnel_address(tunnel) or 'неизвестно'}). "
                     "Скрипт не перенаправляет и не удаляет чужие эндпоинты."
                 )
+            if (tunnel.get("config") or {}).get("inspect") is not False:
+                raise LauncherError(
+                    "Туннель ngrok включает inspect и может записывать данные пользователей. "
+                    "Перезапустите службу с --inspect=false: скрипт не меняет настройки чужого туннеля."
+                )
         public = [tunnel for tunnel in tunnels if str(tunnel.get("public_url") or "").startswith("https://")]
         if len(public) == 1:
             return str(public[0]["public_url"])[len("https://") :].rstrip("/")
@@ -376,9 +405,10 @@ def main(argv=None):
             _compose_config_quiet(MAIN_PROJECT, MAIN_COMPOSE, env_file)
             _compose_config_quiet(GATEWAY_PROJECT, GATEWAY_COMPOSE)
             _assert_ports(env_file)
-            _ensure_ngrok(desired_plist, _load_tunnels())
+            # Сначала локальная готовность: до неё туннель и старая служба не меняются.
             _start_stack(env_file, no_build=arguments.no_build)
             _wait_local_gateway()
+            _ensure_ngrok(desired_plist, _load_tunnels())
             domain = _wait_gateway_tunnel()
             _wait_public(domain)
             _report_legacy()

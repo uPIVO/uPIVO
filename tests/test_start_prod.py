@@ -288,8 +288,40 @@ class LauncherTest(unittest.TestCase):
         self.assertFalse(any("bootstrap" in command for command in recorder.commands))
         self.assertFalse(any("down" in command for command in recorder.commands))
 
-    def test_stopped_job_is_kickstarted_when_port_free(self):
+
+    def test_local_readiness_failure_skips_ngrok_mutation(self):
+        def status(url, headers=None, timeout=3.0):
+            return 200 if url.endswith("/healthz") else None
+
+        with mock.patch.object(start_prod, "_http_status", side_effect=status):
+            code, _out, err, recorder = self.run_launcher(tunnels=None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Локальная проверка", err)
+        self.assertTrue(recorder.has("docker", "compose", "up"))
+        mutations = [command for command in recorder.commands if command[0] == "launchctl" and command[1] != "print"]
+        self.assertEqual(mutations, [], recorder.joined())
+        self.assertFalse(any("down" in command for command in recorder.commands))
+
+    def test_ngrok_bootstrap_runs_after_stack_and_local_checks(self):
+        answers = [None, GATEWAY_TUNNELS]
+        code, _out, err, recorder = self.run_launcher(
+            tunnels=lambda *_args: answers.pop(0) if len(answers) > 1 else GATEWAY_TUNNELS
+        )
+
+        self.assertEqual(code, 0, err)
+        joined = recorder.joined()
+        main_up = next(index for index, line in enumerate(joined) if "up -d" in line and start_prod.MAIN_PROJECT in line)
+        gateway_up = next(index for index, line in enumerate(joined) if "up -d" in line and start_prod.GATEWAY_PROJECT in line)
+        bootstrap = next(index for index, line in enumerate(joined) if "launchctl bootstrap" in line)
+        self.assertGreater(bootstrap, main_up)
+        self.assertGreater(bootstrap, gateway_up)
+
+    def test_disabled_matching_plist_is_enabled_then_bootstrapped(self):
         self.install_plist()
+        log_dir = self.home / "Library" / "Logs" / "upivo-gateway"
+        self.assertFalse(log_dir.exists())
+        answers = [None, GATEWAY_TUNNELS]
 
         def handler(parts):
             if parts[:2] == ["launchctl", "print"]:
@@ -298,17 +330,68 @@ class LauncherTest(unittest.TestCase):
                 return 1, ""
             return self.default_handler(parts)
 
-        answers = [None, GATEWAY_TUNNELS]
         code, _out, err, recorder = self.run_launcher(
             handler=handler, tunnels=lambda *_args: answers.pop(0) if len(answers) > 1 else GATEWAY_TUNNELS
         )
 
         self.assertEqual(code, 0, err)
         joined = recorder.joined()
-        kickstart = [line for line in joined if "kickstart" in line]
-        self.assertEqual(len(kickstart), 1, joined)
-        self.assertIn(f"gui/{UID}/{start_prod.NEW_LABEL}", kickstart[0])
-        self.assertFalse(any("bootout" in line or "bootstrap" in line for line in joined))
+        enable = [index for index, line in enumerate(joined) if "launchctl enable" in line]
+        bootout = [index for index, line in enumerate(joined) if "launchctl bootout" in line]
+        bootstrap = [index for index, line in enumerate(joined) if "launchctl bootstrap" in line]
+        self.assertEqual(len(enable), 1, joined)
+        self.assertEqual(len(bootout), 1, joined)
+        self.assertEqual(len(bootstrap), 1, joined)
+        self.assertIn(f"gui/{UID}/{start_prod.NEW_LABEL}", joined[enable[0]])
+        self.assertLess(enable[0], bootout[0])
+        self.assertLess(bootout[0], bootstrap[0])
+        self.assertTrue(log_dir.is_dir())
+
+    def test_installed_plist_absent_is_enabled_then_bootstrapped(self):
+        log_dir = self.home / "Library" / "Logs" / "upivo-gateway"
+        answers = [None, GATEWAY_TUNNELS]
+
+        code, _out, err, recorder = self.run_launcher(
+            tunnels=lambda *_args: answers.pop(0) if len(answers) > 1 else GATEWAY_TUNNELS
+        )
+
+        self.assertEqual(code, 0, err)
+        joined = recorder.joined()
+        enable = [index for index, line in enumerate(joined) if "launchctl enable" in line]
+        bootstrap = [index for index, line in enumerate(joined) if "launchctl bootstrap" in line]
+        self.assertEqual(len(enable), 1, joined)
+        self.assertEqual(len(bootstrap), 1, joined)
+        self.assertLess(enable[0], bootstrap[0])
+        self.assertTrue((self.home / "Library" / "LaunchAgents" / f"{start_prod.NEW_LABEL}.plist").is_file())
+        self.assertTrue(log_dir.is_dir())
+
+    def test_inspected_tunnel_is_rejected(self):
+        self.install_plist()
+        inspected = {
+            "tunnels": [
+                {
+                    "public_url": "https://demo.ngrok-free.app",
+                    "config": {"addr": "http://127.0.0.1:18080", "inspect": True},
+                }
+            ]
+        }
+
+        code, _out, err, recorder = self.run_launcher(tunnels=inspected)
+
+        self.assertEqual(code, 1)
+        self.assertIn("inspect", err)
+        self.assertFalse(any("down" in command for command in recorder.commands))
+        self.assertFalse(recorder.has("kickstart"))
+
+    def test_home_with_ampersand_stays_escaped(self):
+        amp_home = Path(str(self.home) + "&co")
+        with mock.patch.object(start_prod, "_home", return_value=amp_home):
+            plist = start_prod._render_plist(NGROK)
+
+        self.assertEqual(plist["ProgramArguments"][0], NGROK)
+        self.assertEqual(plist["EnvironmentVariables"]["HOME"], str(amp_home))
+        self.assertEqual(plist["StandardOutPath"], str(amp_home / "Library" / "Logs" / "upivo-gateway" / "ngrok.log"))
+        self.assertEqual(plistlib.loads(plistlib.dumps(plist)), plist)
 
     def test_import_has_no_side_effects(self):
         with tempfile.TemporaryDirectory() as temporary:
