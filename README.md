@@ -5,26 +5,20 @@
 Стек: Python 3.12, uv, FastAPI, PostgreSQL, SQLAlchemy 2, Alembic.
 Redis и Celery подготовлены; worker/beat запускаются опционально.
 
-Новичкам: **[Начни здесь — готовое окружение для разработки](START_HERE.md)**.
-Из корня на любой системе: `uv run --no-project --python 3.12 start.py`.
+Ветка `deploy/local-demo` предназначена для отдельного публичного демостенда, а не рабочего окружения разработки. Настройка и запуск: **[локальный демостенд](docs/LOCAL_DEMO.md)**. Автоматический запуск через `start.py` не заменяет настройку секретов.
 
 ## Запуск
 
-Нужен Docker с Compose. Из корня проекта:
+Нужен Docker с Compose. Сначала создайте `.env` по [инструкции демостенда](docs/LOCAL_DEMO.md): задайте `POSTGRES_PASSWORD`, `AUTH_TOKEN_SECRET` и нужные ключи. Значения секретов не храните в Git.
 
 ```bash
-cp .env.example .env
+docker compose config --quiet
 docker compose up --build -d --wait
 ```
 
-В PowerShell: `Copy-Item .env.example .env` вместо `cp`.
-Миграции применяются автоматически.
+Миграции применяются автоматически. Swagger: http://127.0.0.1:18000/docs · Health: http://127.0.0.1:18000/health. Адреса соответствуют стандартным портам демостенда.
 
-Swagger: http://localhost:8000/docs · Health: http://localhost:8000/health
-
-Остановка: `docker compose down` — данные БД сохраняются.
-
-Локальный демостенд: [инструкция](docs/LOCAL_DEMO.md).
+Остановка: `docker compose --profile workers down` — данные БД сохраняются.
 
 ## Проверки
 
