@@ -35,7 +35,7 @@ def test_sprint3_upgrade_preserves_main_data_and_digest_snapshots(migration_data
             == snapshots
         )
         assert conn.scalars(text("SELECT version_num FROM alembic_version")).all() == [
-            "0014_sprint3_heads"
+            "0015_digest_settings"
         ]
     # New tables are empty; downgrading just the sprint is safe for existing main data.
     result = _alembic(url, "downgrade", "0010_digest_items_snapshot")

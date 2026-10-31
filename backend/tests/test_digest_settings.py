@@ -185,7 +185,9 @@ def sqlite_engine():
 
         conn.execute(
             text(
-                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, original_url, published_at, collected_at, importance_score, processing_status) VALUES "
+                "INSERT INTO feed_items (id, source_id, external_id, title, body_text, "
+                "original_url, published_at, collected_at, importance_score, "
+                "processing_status) VALUES "
                 "(1, 1, 'ext1', 'News 1', 'Content 1', 'http://1', :h12, :h12, 9.0, 'normalized'), "
                 "(2, 1, 'ext2', 'News 2', 'Content 2', 'http://2', :h12, :h12, 8.0, 'normalized'), "
                 "(3, 1, 'ext3', 'News 3', 'Content 3', 'http://3', :h48, :h48, 7.0, 'normalized'), "
@@ -283,7 +285,7 @@ def test_digest_generation_uses_user_settings(client: TestClient):
         json={"period_hours": 72, "max_items": 2},
     )
 
-    # Для пользователя 2 за 72 часа доступны все 5 статей, но max_items=2 ограничит дайджест 2 публикациями
+    # За 72 часа доступны 5 статей; max_items=2 ограничивает дайджест двумя.
     res2 = client.post("/api/digests/generate", json={"user_id": 2, "type": "general"})
     assert res2.status_code == 201
     assert res2.json()["items_count"] == 2
@@ -310,3 +312,43 @@ def test_digest_generation_override_settings_via_request(client: TestClient):
     # Должно быть отобрано 4 инфоповода
     assert res.json()["items_count"] == 4
 
+
+@pytest.mark.parametrize("method", ["get", "put"])
+def test_settings_reject_foreign_user(client, method):
+    from tests.auth_helpers import auth_headers
+
+    kwargs = {"headers": auth_headers(1)}
+    if method == "put":
+        kwargs["json"] = {"max_items": 1}
+    response = getattr(client, method)("/api/digests/settings?user_id=2", **kwargs)
+    assert response.status_code == 403
+    assert client.get("/api/digests/settings?user_id=2").json()["max_items"] == 15
+
+
+@pytest.mark.parametrize("method", ["get", "put"])
+def test_settings_require_authentication(client, method):
+    kwargs = {"headers": {"Authorization": ""}}
+    if method == "put":
+        kwargs["json"] = {"max_items": 1}
+    assert getattr(client, method)("/api/digests/settings", **kwargs).status_code == 401
+
+
+def test_partial_settings_and_overrides_do_not_change_existing_digest(client):
+    from tests.auth_helpers import auth_headers
+
+    assert client.put("/api/digests/settings", json={"period_hours": 72}).status_code == 200
+    assert client.put("/api/digests/settings", json={"max_items": 1}).status_code == 200
+    settings = client.get("/api/digests/settings").json()
+    assert (settings["period_hours"], settings["max_items"]) == (72, 1)
+    # Without user_id the authenticated identity is used.
+    assert client.get("/api/digests/settings", headers=auth_headers(2)).json()["user_id"] == 2
+    result = client.post("/api/digests/generate", json={
+        "user_id": 1, "period_hours": 24, "max_items": 2,
+    })
+    assert result.status_code == 201
+    snapshot = result.json()
+    assert snapshot["items_count"] == 2
+    assert client.get("/api/digests/settings").json() == settings
+    client.put("/api/digests/settings", json={"period_hours": 168, "max_items": 100})
+    saved = client.get(f"/api/digests/{snapshot['id']}?user_id=1")
+    assert saved.json() == snapshot

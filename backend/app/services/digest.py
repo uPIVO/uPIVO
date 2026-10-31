@@ -4,6 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import String, cast, delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.content_cluster import ClusterItem, ContentCluster
@@ -526,14 +527,24 @@ class DigestService:
         return "\n\n".join(lines)
 
     def get_or_create_settings(self, user_id: int) -> UserDigestSetting:
-        """Получить текущие настройки дайджестов пользователя или создать с дефолтными значениями."""
+        """Получить настройки или безопасно создать их при первом обращении."""
         require_user(self.db, user_id)
         settings = self.db.get(UserDigestSetting, user_id)
         if not settings:
             settings = UserDigestSetting(user_id=user_id, period_hours=24, max_items=15)
-            self.db.add(settings)
-            self.db.commit()
-            self.db.refresh(settings)
+            try:
+                # Concurrent first GET/PUT/generate requests can race on user_id.
+                # A savepoint rolls back only our insert, preserving the session.
+                with self.db.begin_nested():
+                    self.db.add(settings)
+                    self.db.flush()
+            except IntegrityError:
+                settings = self.db.get(UserDigestSetting, user_id)
+                if settings is None:
+                    raise
+            else:
+                self.db.commit()
+                self.db.refresh(settings)
         return settings
 
     def get_settings(self, user_id: int) -> DigestSettingsResponse:

@@ -5,8 +5,9 @@ Revises: 0014_sprint3_heads
 Create Date: 2026-10-30 20:30:00.000000
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0015_digest_settings"
 down_revision = "0014_sprint3_heads"

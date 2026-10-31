@@ -13,10 +13,12 @@ class DigestCreateRequest(BaseModel):
     )
     topic: str | None = Field(default=None, description="Тема (обязательна для topic дайджеста)")
     period_hours: int | None = Field(
-        default=None, ge=1, le=168, description="Период выборки новостей в часах (по умолчанию из настроек пользователя или 24)"
+        default=None, ge=1, le=168,
+        description="Период выборки новостей в часах (по умолчанию из настроек пользователя или 24)"
     )
     max_items: int | None = Field(
-        default=None, ge=1, le=100, description="Максимальное количество инфоповодов (по умолчанию из настроек пользователя или 15)"
+        default=None, ge=1, le=100,
+        description="Лимит инфоповодов (по умолчанию из настроек пользователя или 15)"
     )
 
 
