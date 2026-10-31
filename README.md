@@ -24,6 +24,8 @@ Swagger: http://localhost:8000/docs · Health: http://localhost:8000/health
 
 Остановка: `docker compose down` — данные БД сохраняются.
 
+Локальный демостенд: [инструкция](docs/LOCAL_DEMO.md).
+
 ## Проверки
 
 Нужен uv. Из корня проекта:
