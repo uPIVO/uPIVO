@@ -246,6 +246,21 @@ class InspectorTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(out.splitlines()), 1, out)
 
+    def test_malformed_envelope_is_rejected_before_output(self):
+        cases = (
+            {},
+            {"user": "bad", "items": []},
+            {"user": {"id": 1}, "items": []},
+            {"user": USER, "items": [None]},
+            {"user": USER, "items": {}},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                code, out, err, _executor = self.run_cli(["--user", "1"], payload)
+                self.assertEqual(code, 1, payload)
+                self.assertEqual(out, "", payload)
+                self.assertIn("неожиданный ответ", err)
+
     def test_unknown_user_is_reported_with_code_two(self):
         code, out, err, _executor = self.run_cli(["--user", "missing@example.com"], {"user": None, "items": []})
 

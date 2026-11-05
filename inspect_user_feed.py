@@ -229,6 +229,20 @@ def _parse_payload(text):
     raise InspectorError("PostgreSQL вернул неожиданный ответ: повторите запрос.")
 
 
+def _split_envelope(payload):
+    """Проверяет форму ответа до любого вывода: user = null или {id, email}, items = список объектов."""
+    unexpected = InspectorError("PostgreSQL вернул неожиданный ответ: повторите запрос.")
+    if "user" not in payload or "items" not in payload:
+        raise unexpected
+    user, items = payload["user"], payload["items"]
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise unexpected
+    if user is not None:
+        if not isinstance(user, dict) or "id" not in user or "email" not in user:
+            raise unexpected
+    return user, items
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Просмотр сохранённых публикаций и релевантности пользователя демостенда."
@@ -252,23 +266,18 @@ def main(argv=None):
 
     try:
         payload = _run_query(identifier, arguments.limit)
+        user, items = _split_envelope(payload)
     except InspectorError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr, flush=True)
         return 1
 
-    user = payload.get("user")
-    if not isinstance(user, dict):
+    if user is None:
         print(
             f"Ошибка: пользователь {_truncate(_clean(identifier), 120)} не найден в проекте {MAIN_PROJECT}.",
             file=sys.stderr,
             flush=True,
         )
         return 2
-
-    items = payload.get("items")
-    if not isinstance(items, list):
-        print("Ошибка: PostgreSQL вернул неожиданный ответ: повторите запрос.", file=sys.stderr, flush=True)
-        return 1
 
     print(
         f"Пользователь: id={_clean(user.get('id'))} email={_clean(user.get('email')) or EMPTY}",
@@ -280,8 +289,7 @@ def main(argv=None):
         print("Публикаций нет: у пользователя нет включённых источников с публикациями.", file=sys.stderr, flush=True)
         return 0
     for item in items:
-        if isinstance(item, dict):
-            print(format_item(item, arguments.width), flush=True)
+        print(format_item(item, arguments.width), flush=True)
     return 0
 
 
