@@ -393,6 +393,113 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(plist["StandardOutPath"], str(amp_home / "Library" / "Logs" / "upivo-gateway" / "ngrok.log"))
         self.assertEqual(plistlib.loads(plistlib.dumps(plist)), plist)
 
+    def test_default_run_does_not_delete_data(self):
+        self.install_plist()
+
+        code, out, err, recorder = self.run_launcher(tunnels=GATEWAY_TUNNELS)
+
+        self.assertEqual(code, 0, err)
+        self.assertFalse(recorder.has("down"))
+        self.assertFalse(recorder.has("--volumes"))
+        self.assertNotIn("--reset-db", out + err)
+
+    def test_reset_runs_after_checks_and_before_stack(self):
+        self.install_plist()
+
+        code, out, err, recorder = self.run_launcher(argv=["--reset-db"], tunnels=GATEWAY_TUNNELS)
+
+        self.assertEqual(code, 0, err)
+        joined = recorder.joined()
+        info = next(index for index, line in enumerate(joined) if line.startswith("docker info"))
+        checks = [index for index, line in enumerate(joined) if " config " in line]
+        down = next(index for index, line in enumerate(joined) if "down --volumes" in line)
+        main_up = next(index for index, line in enumerate(joined) if "up -d" in line and start_prod.MAIN_PROJECT in line)
+        self.assertTrue(checks, joined)
+        self.assertLess(info, down)
+        self.assertLess(max(checks), down)
+        self.assertLess(down, main_up)
+        self.assertIn("PostgreSQL", err)
+        self.assertIn("Redis", err)
+
+    def test_reset_down_is_scoped_to_demo_project(self):
+        self.install_plist()
+
+        code, _out, err, recorder = self.run_launcher(argv=["--reset-db"], tunnels=GATEWAY_TUNNELS)
+
+        self.assertEqual(code, 0, err)
+        downs = [command for command in recorder.commands if "down" in command]
+        self.assertEqual(len(downs), 1, recorder.joined())
+        self.assertEqual(
+            downs[0],
+            [
+                "docker",
+                "compose",
+                "-p",
+                start_prod.MAIN_PROJECT,
+                "-f",
+                str(start_prod.MAIN_COMPOSE),
+                "--env-file",
+                str(self.env_file),
+                "--profile",
+                "workers",
+                "down",
+                "--volumes",
+            ],
+        )
+        self.assertNotIn(start_prod.GATEWAY_PROJECT, downs[0])
+        self.assertFalse(any("prune" in part for command in recorder.commands for part in command))
+        self.assertFalse(recorder.has("volume", "rm"))
+
+    def test_reset_warning_is_printed_before_down(self):
+        self.install_plist()
+        buffer = io.StringIO()
+        seen = []
+
+        def handler(parts):
+            seen.append((parts, buffer.getvalue()))
+            return self.default_handler(parts)
+
+        with mock.patch.object(start_prod, "_run", Recorder(handler)):
+            with mock.patch.object(start_prod, "_json", mock.Mock(return_value=GATEWAY_TUNNELS)):
+                with redirect_stdout(buffer), redirect_stderr(buffer):
+                    code = start_prod.main(["--reset-db"])
+
+        self.assertEqual(code, 0, buffer.getvalue())
+        _down, before_down = next((parts, text) for parts, text in seen if "down" in parts)
+        self.assertIn("PostgreSQL", before_down)
+        self.assertIn("Redis", before_down)
+
+    def test_failed_reset_stops_before_stack_and_ngrok(self):
+        self.install_plist()
+
+        def handler(parts):
+            if "down" in parts:
+                return 1, ""
+            return self.default_handler(parts)
+
+        code, _out, err, recorder = self.run_launcher(handler=handler, argv=["--reset-db"], tunnels=GATEWAY_TUNNELS)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Ошибка", err)
+        self.assertIn(start_prod.MAIN_PROJECT, err)
+        self.assertTrue(recorder.has("docker", "compose", "down"))
+        self.assertFalse(recorder.has("docker", "compose", "up"))
+        mutations = [command for command in recorder.commands if command[0] == "launchctl" and command[1] != "print"]
+        self.assertEqual(mutations, [], recorder.joined())
+        self.assertFalse(any("kickstart" in command for command in recorder.commands))
+
+    def test_reset_combines_with_no_build(self):
+        self.install_plist()
+
+        code, _out, err, recorder = self.run_launcher(argv=["--reset-db", "--no-build"], tunnels=GATEWAY_TUNNELS)
+
+        self.assertEqual(code, 0, err)
+        joined = recorder.joined()
+        down = next(index for index, line in enumerate(joined) if "down --volumes" in line)
+        main_up = next(index for index, line in enumerate(joined) if "up -d" in line and start_prod.MAIN_PROJECT in line)
+        self.assertLess(down, main_up)
+        self.assertNotIn("--build", recorder.commands[main_up])
+
     def test_import_has_no_side_effects(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary)

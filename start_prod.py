@@ -311,6 +311,20 @@ def _ensure_ngrok(desired_plist, tunnels):
     _launchctl("bootstrap", f"gui/{_uid()}", str(_plist_path()))
 
 
+def _reset_demo_data(env_file):
+    # Удаляются только тома проекта upivo-demo: общий шлюз, ngrok и другие проекты не затрагиваются.
+    print(
+        f"ВНИМАНИЕ: --reset-db удаляет данные PostgreSQL и Redis демостенда {MAIN_PROJECT}. "
+        "Резервная копия не создаётся; общий шлюз, ngrok и другое окружение не меняются.",
+        file=sys.stderr,
+        flush=True,
+    )
+    command = [*_compose(MAIN_PROJECT, MAIN_COMPOSE, env_file), "--profile", "workers", "down", "--volumes"]
+    result = _run(command, timeout=300)
+    if result.returncode != 0:
+        raise LauncherError(f"Не удалось удалить данные {MAIN_PROJECT} (--reset-db): {result.stderr.strip()}")
+
+
 def _start_stack(env_file, *, no_build):
     main = [*_compose(MAIN_PROJECT, MAIN_COMPOSE, env_file), "--profile", "workers", "up", "-d"]
     if not no_build:
@@ -394,6 +408,11 @@ def _report_legacy():
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Запуск демостенда uPIVO одной командой.")
     parser.add_argument("--no-build", action="store_true", help="не пересобирать образ API")
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="удалить данные PostgreSQL и Redis демостенда upivo-demo перед запуском (необратимо)",
+    )
     arguments = parser.parse_args(argv)
     try:
         _check_host()
@@ -405,6 +424,8 @@ def main(argv=None):
             _compose_config_quiet(MAIN_PROJECT, MAIN_COMPOSE, env_file)
             _compose_config_quiet(GATEWAY_PROJECT, GATEWAY_COMPOSE)
             _assert_ports(env_file)
+            if arguments.reset_db:
+                _reset_demo_data(env_file)
             # Сначала локальная готовность: до неё туннель и старая служба не меняются.
             _start_stack(env_file, no_build=arguments.no_build)
             _wait_local_gateway()
